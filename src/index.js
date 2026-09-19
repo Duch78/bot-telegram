@@ -17,9 +17,6 @@ const YONIBET_URL = process.env.YONIBET_URL || "https://tinyurl.com/NASSRIxYONIB
 const VIP_PRICE_TEXT = process.env.VIP_PRICE_TEXT || "Tarif communiqué par l’administrateur";
 const VIP_DAYS = Number(process.env.VIP_DAYS || 30);
 const INVITE_MINUTES = Number(process.env.INVITE_MINUTES || 15);
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
-const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
-const SUPABASE_VIP_SECRET = process.env.SUPABASE_VIP_SECRET || "";
 const ADMIN_USER_IDS = new Set(
   (process.env.ADMIN_USER_IDS || "")
     .split(",")
@@ -67,52 +64,88 @@ const memory = {
   nextRequestId: 1,
 };
 
+const memoryUsers = new Map();
+const memorySubscriptions = new Map();
+const memorySessions = new Map();
+const memoryRequests = new Map();
+let memoryNextRequestId = 1;
+
 function supabaseConfigured() {
   return true;
 }
 
 async function db(action, payload = {}) {
-  const uid = payload.telegram_id != null ? String(payload.telegram_id) : null;
-  if (action === "health") return { ok: true, storage: "memory" };
-  if (action === "ensure_user") { memory.users.set(uid, { ...payload }); return { ok: true }; }
-  if (action === "get_subscription") return memory.subscriptions.get(uid) || null;
-  if (action === "set_session") { memory.sessions.set(uid, { ...payload }); return { ok: true }; }
-  if (action === "get_session") return memory.sessions.get(uid) || null;
-  if (action === "delete_session") { memory.sessions.delete(uid); return { ok: true }; }
+  const userKey = payload.telegram_id != null ? String(payload.telegram_id) : null;
+
+  if (action === "health") return { ok: true, storage: "telegram-memory" };
+
+  if (action === "ensure_user") {
+    memoryUsers.set(userKey, { ...payload });
+    return { ok: true };
+  }
+
+  if (action === "get_subscription") {
+    return memorySubscriptions.get(userKey) || null;
+  }
+
+  if (action === "set_session") {
+    memorySessions.set(userKey, { ...payload });
+    return { ok: true };
+  }
+
+  if (action === "get_session") {
+    return memorySessions.get(userKey) || null;
+  }
+
+  if (action === "delete_session") {
+    memorySessions.delete(userKey);
+    return { ok: true };
+  }
+
   if (action === "create_request") {
-    const request = { id: memory.nextRequestId++, telegram_id: Number(payload.telegram_id), method: payload.method, kind: payload.kind, status: "pending", created_at: new Date().toISOString() };
-    memory.requests.set(String(request.id), request);
+    const request = {
+      id: memoryNextRequestId++,
+      telegram_id: Number(payload.telegram_id),
+      method: payload.method,
+      kind: payload.kind,
+      status: "pending",
+    };
+    memoryRequests.set(String(request.id), request);
     return request;
   }
-  if (action === "set_admin_message") { const request = memory.requests.get(String(payload.request_id)); if (request) request.admin_message_id = Number(payload.admin_message_id); return { ok: true }; }
-  if (action === "approve_request") {
-    const request = memory.requests.get(String(payload.request_id));
-    if (!request || request.status !== "pending") return null;
-    const key = String(request.telegram_id);
-    const current = memory.subscriptions.get(key);
-    const now = Date.now();
-    const currentExpiry = current ? new Date(current.expires_at).getTime() : 0;
-    const base = current && current.status === "active" && currentExpiry > now ? currentExpiry : now;
-    const expiresAt = new Date(base + Number(payload.vip_days || 30) * 86400000).toISOString();
-    memory.subscriptions.set(key, { telegram_id: request.telegram_id, expires_at: expiresAt, status: "active", reminder_sent_at: null });
-    request.status = "approved";
-    request.reviewed_by = Number(payload.reviewer_id);
-    request.reviewed_at = new Date().toISOString();
-    return { request: { ...request }, expires_at: expiresAt };
+
+  if (action === "set_admin_message") {
+    const request = memoryRequests.get(String(payload.request_id));
+    if (request) request.admin_message_id = Number(payload.admin_message_id);
+    return { ok: true };
   }
+
+  if (action === "approve_request") {
+    const request = memoryRequests.get(String(payload.request_id));
+    if (!request || request.status !== "pending") return null;
+    const now = Date.now();
+    const expiresAt = new Date(now + Number(payload.vip_days || 30) * 86400000).toISOString();
+    request.status = "approved";
+    memorySubscriptions.set(String(request.telegram_id), {
+      telegram_id: request.telegram_id,
+      expires_at: expiresAt,
+      status: "active"
+    });
+    return { request, expires_at: expiresAt };
+  }
+
   if (action === "reject_request") {
-    const request = memory.requests.get(String(payload.request_id));
+    const request = memoryRequests.get(String(payload.request_id));
     if (!request || request.status !== "pending") return null;
     request.status = "rejected";
-    request.reviewed_by = Number(payload.reviewer_id);
-    request.reviewed_at = new Date().toISOString();
-    return { ...request };
+    return request;
   }
+
   if (action === "list_expired" || action === "list_reminders") return [];
   if (action === "mark_expired" || action === "mark_reminder") return { ok: true };
-  throw new Error("Unknown memory action: " + action);
-}
 
+  throw new Error("Unknown in-memory action: " + action);
+}
 async function ensureUser(ctx) {
   const from = ctx.from;
   if (!from || !supabaseConfigured()) return;
