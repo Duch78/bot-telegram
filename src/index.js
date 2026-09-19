@@ -1,0 +1,852 @@
+require("dotenv").config();
+
+const express = require("express");
+const { Telegraf, Markup } = require("telegraf");
+const { Pool } = require("pg");
+
+const PORT = Number(process.env.PORT || 10000);
+const BOT_TOKEN = process.env.BOT_TOKEN || "";
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || "";
+const VIP_CHAT_ID = process.env.VIP_CHAT_ID || "";
+const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
+const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/telegram/webhook";
+const PAYPAL_URL = process.env.PAYPAL_URL || "";
+const PAYSAFECARD_TEXT =
+  process.env.PAYSAFECARD_TEXT ||
+  "Effectue ton paiement Paysafecard selon les instructions de l’administrateur, puis envoie uniquement une preuve du paiement.";
+const YONIBET_URL = process.env.YONIBET_URL || "";
+const VIP_PRICE_TEXT = process.env.VIP_PRICE_TEXT || "Tarif communiqué par l’administrateur";
+const VIP_DAYS = Number(process.env.VIP_DAYS || 30);
+const INVITE_MINUTES = Number(process.env.INVITE_MINUTES || 15);
+const ADMIN_USER_IDS = new Set(
+  (process.env.ADMIN_USER_IDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
+
+const app = express();
+app.use(express.json({ limit: "15mb" }));
+
+let pool = null;
+let bot = null;
+
+if (DATABASE_URL) {
+  pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
+  });
+}
+
+function escapeHtml(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function methodLabel(method) {
+  return {
+    paypal: "PayPal",
+    paysafecard: "Paysafecard",
+    yonibet: "Affiliation Yonibet",
+  }[method] || method;
+}
+
+function kindLabel(kind) {
+  return kind === "renewal" ? "Renouvellement" : "Première souscription";
+}
+
+function formatDate(date) {
+  return new Intl.DateTimeFormat("fr-FR", {
+    timeZone: "Europe/Paris",
+    dateStyle: "long",
+    timeStyle: "short",
+  }).format(new Date(date));
+}
+
+async function query(text, params = []) {
+  if (!pool) throw new Error("DATABASE_URL manquant");
+  return pool.query(text, params);
+}
+
+async function initDb() {
+  if (!pool) return;
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS users (
+      telegram_id BIGINT PRIMARY KEY,
+      username TEXT,
+      first_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      telegram_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      reminder_sent_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      telegram_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+      state TEXT NOT NULL,
+      method TEXT,
+      kind TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS requests (
+      id BIGSERIAL PRIMARY KEY,
+      telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+      method TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      admin_message_id BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ,
+      reviewed_by BIGINT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_expiry
+      ON subscriptions(status, expires_at);
+
+    CREATE INDEX IF NOT EXISTS idx_requests_status
+      ON requests(status, created_at);
+  `);
+}
+
+async function ensureUser(ctx) {
+  const from = ctx.from;
+  if (!from || !pool) return;
+
+  await query(
+    `INSERT INTO users (telegram_id, username, first_name, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (telegram_id)
+     DO UPDATE SET username = EXCLUDED.username,
+                   first_name = EXCLUDED.first_name,
+                   updated_at = NOW()`,
+    [from.id, from.username || null, from.first_name || null]
+  );
+}
+
+async function getSubscription(telegramId) {
+  if (!pool) return null;
+  const result = await query(
+    "SELECT * FROM subscriptions WHERE telegram_id = $1",
+    [telegramId]
+  );
+  return result.rows[0] || null;
+}
+
+function isActiveSubscription(subscription) {
+  return (
+    subscription &&
+    subscription.status === "active" &&
+    new Date(subscription.expires_at).getTime() > Date.now()
+  );
+}
+
+async function showHome(ctx) {
+  await ensureUser(ctx);
+
+  if (!pool) {
+    return ctx.reply(
+      "⚙️ Le bot est installé mais la base de données n’est pas encore configurée."
+    );
+  }
+
+  const subscription = await getSubscription(ctx.from.id);
+  const active = isActiveSubscription(subscription);
+  const everSubscribed = Boolean(subscription);
+
+  if (active) {
+    return ctx.reply(
+      `👑 <b>VIP actif</b>\n\nTon accès est valable jusqu’au <b>${escapeHtml(
+        formatDate(subscription.expires_at)
+      )}</b>.\n\nQue veux-tu faire ?`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🔐 Accéder au canal VIP", "access_vip")],
+          [Markup.button.callback("♻️ Renouveler mon VIP", "renew")],
+          [Markup.button.callback("📅 Mon abonnement", "status")],
+        ]),
+      }
+    );
+  }
+
+  const button = everSubscribed
+    ? Markup.button.callback("♻️ Renouveler mon VIP", "renew")
+    : Markup.button.callback("👑 Prendre le VIP", "subscribe");
+
+  return ctx.reply(
+    `👑 <b>VIP Pronostics</b>\n\nAccès VIP : <b>${escapeHtml(
+      VIP_PRICE_TEXT
+    )}</b>\nDurée : <b>${VIP_DAYS} jours</b>.\n\nChoisis ci-dessous pour commencer.`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[button], [Markup.button.callback("❓ Comment ça marche ?", "help")]]),
+    }
+  );
+}
+
+async function showMethods(ctx, kind) {
+  await ensureUser(ctx);
+  const subscription = await getSubscription(ctx.from.id);
+  const everSubscribed = Boolean(subscription);
+
+  const buttons = [
+    [Markup.button.callback("💙 PayPal", `method:${kind}:paypal`)],
+    [Markup.button.callback("🎫 Paysafecard", `method:${kind}:paysafecard`)],
+  ];
+
+  if (kind === "initial" && !everSubscribed) {
+    buttons.push([
+      Markup.button.callback(
+        "🎁 Affiliation Yonibet",
+        `method:${kind}:yonibet`
+      ),
+    ]);
+  }
+
+  buttons.push([Markup.button.callback("⬅️ Retour", "home")]);
+
+  return ctx.reply(
+    kind === "renewal"
+      ? "♻️ <b>Renouvellement VIP</b>\n\nPour renouveler, choisis PayPal ou Paysafecard."
+      : "👑 <b>Première souscription</b>\n\nChoisis ton moyen d’accès au VIP.",
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(buttons),
+    }
+  );
+}
+
+async function showMethodInstructions(ctx, kind, method) {
+  const label = methodLabel(method);
+  let text = `💳 <b>${escapeHtml(label)}</b>\n\n`;
+  const buttons = [];
+
+  if (method === "paypal") {
+    text += PAYPAL_URL
+      ? "Effectue le paiement avec le bouton ci-dessous puis reviens ici pour envoyer ta preuve."
+      : "Le lien PayPal sera ajouté prochainement par l’administrateur.";
+    if (PAYPAL_URL) {
+      buttons.push([Markup.button.url("💙 Ouvrir PayPal", PAYPAL_URL)]);
+    }
+  }
+
+  if (method === "paysafecard") {
+    text += escapeHtml(PAYSAFECARD_TEXT);
+  }
+
+  if (method === "yonibet") {
+    if (kind !== "initial") {
+      return ctx.answerCbQuery("Yonibet est réservé à la première souscription.");
+    }
+    text += YONIBET_URL
+      ? "Inscris-toi via le lien partenaire, remplis les conditions demandées puis reviens envoyer ta preuve."
+      : "Le lien d’affiliation Yonibet sera ajouté prochainement par l’administrateur.";
+    if (YONIBET_URL) {
+      buttons.push([Markup.button.url("🎁 Ouvrir Yonibet", YONIBET_URL)]);
+    }
+  }
+
+  text +=
+    "\n\n⚠️ <b>Important :</b> n’envoie jamais de pièce d’identité ni le code/PIN complet d’une Paysafecard dans le bot.";
+
+  buttons.push([
+    Markup.button.callback(
+      "📎 Envoyer ma preuve",
+      `proof:${kind}:${method}`
+    ),
+  ]);
+  buttons.push([Markup.button.callback("⬅️ Retour", kind === "renewal" ? "renew" : "subscribe")]);
+
+  return ctx.reply(text, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard(buttons),
+  });
+}
+
+async function createVipInvite(telegramId) {
+  if (!bot || !VIP_CHAT_ID) {
+    throw new Error("VIP_CHAT_ID ou bot non configuré");
+  }
+
+  try {
+    await bot.telegram.unbanChatMember(VIP_CHAT_ID, telegramId, {
+      only_if_banned: true,
+    });
+  } catch (error) {
+    console.warn("unban before invite:", error.message);
+  }
+
+  const invite = await bot.telegram.createChatInviteLink(VIP_CHAT_ID, {
+    expire_date: Math.floor(Date.now() / 1000) + INVITE_MINUTES * 60,
+    member_limit: 1,
+    name: `VIP-${telegramId}-${Date.now()}`,
+  });
+
+  return invite.invite_link;
+}
+
+async function approveRequest(requestId, reviewerId) {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const requestResult = await client.query(
+      "SELECT * FROM requests WHERE id = $1 FOR UPDATE",
+      [requestId]
+    );
+    const request = requestResult.rows[0];
+
+    if (!request || request.status !== "pending") {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const subscriptionResult = await client.query(
+      "SELECT * FROM subscriptions WHERE telegram_id = $1 FOR UPDATE",
+      [request.telegram_id]
+    );
+    const existing = subscriptionResult.rows[0];
+
+    const now = new Date();
+    let base = now;
+
+    if (
+      existing &&
+      existing.status === "active" &&
+      new Date(existing.expires_at).getTime() > now.getTime()
+    ) {
+      base = new Date(existing.expires_at);
+    }
+
+    const expiresAt = new Date(
+      base.getTime() + VIP_DAYS * 24 * 60 * 60 * 1000
+    );
+
+    await client.query(
+      `INSERT INTO subscriptions
+        (telegram_id, started_at, expires_at, status, reminder_sent_at, updated_at)
+       VALUES ($1, NOW(), $2, 'active', NULL, NOW())
+       ON CONFLICT (telegram_id)
+       DO UPDATE SET expires_at = EXCLUDED.expires_at,
+                     status = 'active',
+                     reminder_sent_at = NULL,
+                     updated_at = NOW()`,
+      [request.telegram_id, expiresAt]
+    );
+
+    await client.query(
+      `UPDATE requests
+       SET status = 'approved', reviewed_at = NOW(), reviewed_by = $2
+       WHERE id = $1`,
+      [requestId, reviewerId]
+    );
+
+    await client.query("COMMIT");
+
+    return { request, expiresAt };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function rejectRequest(requestId, reviewerId) {
+  const result = await query(
+    `UPDATE requests
+     SET status = 'rejected', reviewed_at = NOW(), reviewed_by = $2
+     WHERE id = $1 AND status = 'pending'
+     RETURNING *`,
+    [requestId, reviewerId]
+  );
+  return result.rows[0] || null;
+}
+
+function adminAllowed(ctx) {
+  const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
+  if (
+    ADMIN_CHAT_ID &&
+    callbackChatId &&
+    String(callbackChatId) !== String(ADMIN_CHAT_ID)
+  ) {
+    return false;
+  }
+
+  if (ADMIN_USER_IDS.size && !ADMIN_USER_IDS.has(String(ctx.from?.id))) {
+    return false;
+  }
+
+  return true;
+}
+
+async function handleProofMessage(ctx) {
+  if (!pool || !ADMIN_CHAT_ID || !ctx.from || !ctx.message) return false;
+
+  const sessionResult = await query(
+    "SELECT * FROM sessions WHERE telegram_id = $1",
+    [ctx.from.id]
+  );
+  const session = sessionResult.rows[0];
+
+  if (!session || session.state !== "awaiting_proof") return false;
+
+  const allowed =
+    Boolean(ctx.message.photo) ||
+    Boolean(ctx.message.document) ||
+    Boolean(ctx.message.text);
+
+  if (!allowed) {
+    await ctx.reply("Envoie une capture, une photo, un PDF ou un message texte comme preuve.");
+    return true;
+  }
+
+  const requestResult = await query(
+    `INSERT INTO requests (telegram_id, method, kind, status)
+     VALUES ($1, $2, $3, 'pending')
+     RETURNING *`,
+    [ctx.from.id, session.method, session.kind]
+  );
+  const request = requestResult.rows[0];
+
+  const username = ctx.from.username ? `@${ctx.from.username}` : "sans @username";
+  const header =
+    `🧾 <b>Nouvelle demande VIP #${request.id}</b>\n\n` +
+    `👤 ${escapeHtml(ctx.from.first_name || "Utilisateur")} (${escapeHtml(username)})\n` +
+    `🆔 <code>${ctx.from.id}</code>\n` +
+    `💳 ${escapeHtml(methodLabel(session.method))}\n` +
+    `📌 ${escapeHtml(kindLabel(session.kind))}\n\n` +
+    "Vérifie la preuve ci-dessous puis valide ou refuse.";
+
+  const adminMessage = await bot.telegram.sendMessage(ADMIN_CHAT_ID, header, {
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "✅ VALIDER", callback_data: `approve:${request.id}` },
+          { text: "❌ REFUSER", callback_data: `reject:${request.id}` },
+        ],
+      ],
+    },
+  });
+
+  try {
+    await bot.telegram.copyMessage(
+      ADMIN_CHAT_ID,
+      ctx.chat.id,
+      ctx.message.message_id,
+      {
+        reply_parameters: { message_id: adminMessage.message_id },
+      }
+    );
+  } catch (error) {
+    console.error("copy proof:", error.message);
+    await bot.telegram.sendMessage(
+      ADMIN_CHAT_ID,
+      `⚠️ Impossible de recopier automatiquement la preuve pour la demande #${request.id}.`
+    );
+  }
+
+  await query(
+    "UPDATE requests SET admin_message_id = $2 WHERE id = $1",
+    [request.id, adminMessage.message_id]
+  );
+  await query("DELETE FROM sessions WHERE telegram_id = $1", [ctx.from.id]);
+
+  await ctx.reply(
+    "✅ Ta preuve a bien été envoyée aux administrateurs. Tu recevras ici le résultat de la validation."
+  );
+
+  return true;
+}
+
+async function sweepExpirations() {
+  if (!pool || !bot || !VIP_CHAT_ID) return;
+
+  const result = await query(
+    `SELECT telegram_id, expires_at
+     FROM subscriptions
+     WHERE status = 'active' AND expires_at <= NOW()
+     ORDER BY expires_at ASC
+     LIMIT 100`
+  );
+
+  for (const row of result.rows) {
+    try {
+      await bot.telegram.banChatMember(VIP_CHAT_ID, row.telegram_id, {
+        revoke_messages: false,
+      });
+      await bot.telegram.unbanChatMember(VIP_CHAT_ID, row.telegram_id, {
+        only_if_banned: true,
+      });
+    } catch (error) {
+      console.error("remove expired member:", row.telegram_id, error.message);
+      continue;
+    }
+
+    await query(
+      `UPDATE subscriptions
+       SET status = 'expired', updated_at = NOW()
+       WHERE telegram_id = $1 AND status = 'active'`,
+      [row.telegram_id]
+    );
+
+    try {
+      await bot.telegram.sendMessage(
+        row.telegram_id,
+        "⏳ Ton accès VIP de 30 jours est terminé. Tu peux le renouveler avec PayPal ou Paysafecard.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("♻️ Renouveler mon VIP", "renew")],
+        ])
+      );
+    } catch (error) {
+      console.warn("expiry notification:", row.telegram_id, error.message);
+    }
+  }
+}
+
+async function sendRenewalReminders() {
+  if (!pool || !bot) return;
+
+  const result = await query(
+    `SELECT telegram_id, expires_at
+     FROM subscriptions
+     WHERE status = 'active'
+       AND expires_at > NOW()
+       AND expires_at <= NOW() + INTERVAL '3 days'
+       AND reminder_sent_at IS NULL
+     LIMIT 100`
+  );
+
+  for (const row of result.rows) {
+    try {
+      await bot.telegram.sendMessage(
+        row.telegram_id,
+        `⏰ Ton VIP expire le ${formatDate(row.expires_at)}. Tu peux le renouveler dès maintenant sans perdre les jours restants.`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback("♻️ Renouveler mon VIP", "renew")],
+        ])
+      );
+
+      await query(
+        "UPDATE subscriptions SET reminder_sent_at = NOW() WHERE telegram_id = $1",
+        [row.telegram_id]
+      );
+    } catch (error) {
+      console.warn("renewal reminder:", row.telegram_id, error.message);
+    }
+  }
+}
+
+function registerBotHandlers(instance) {
+  instance.start(showHome);
+  instance.command("menu", showHome);
+  instance.command("cancel", async (ctx) => {
+    await ensureUser(ctx);
+    if (pool) {
+      await query("DELETE FROM sessions WHERE telegram_id = $1", [ctx.from.id]);
+    }
+    await ctx.reply("Action annulée.");
+    await showHome(ctx);
+  });
+
+  instance.action("home", async (ctx) => {
+    await ctx.answerCbQuery();
+    await showHome(ctx);
+  });
+
+  instance.action("subscribe", async (ctx) => {
+    await ctx.answerCbQuery();
+    const subscription = await getSubscription(ctx.from.id);
+    if (subscription) return showMethods(ctx, "renewal");
+    return showMethods(ctx, "initial");
+  });
+
+  instance.action("renew", async (ctx) => {
+    await ctx.answerCbQuery();
+    await showMethods(ctx, "renewal");
+  });
+
+  instance.action("help", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      "ℹ️ Choisis ton moyen d’accès, envoie ta preuve, puis un administrateur la vérifie. Après validation, le bot te remet un lien privé à usage unique. L’accès dure 30 jours. Les renouvellements se font uniquement par PayPal ou Paysafecard."
+    );
+  });
+
+  instance.action("status", async (ctx) => {
+    await ctx.answerCbQuery();
+    const subscription = await getSubscription(ctx.from.id);
+    if (!isActiveSubscription(subscription)) {
+      return ctx.reply(
+        "Ton VIP n’est pas actif.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("♻️ Renouveler", "renew")],
+        ])
+      );
+    }
+    return ctx.reply(
+      `👑 VIP actif jusqu’au <b>${escapeHtml(
+        formatDate(subscription.expires_at)
+      )}</b>.`,
+      { parse_mode: "HTML" }
+    );
+  });
+
+  instance.action("access_vip", async (ctx) => {
+    await ctx.answerCbQuery("Création de ton lien…");
+    const subscription = await getSubscription(ctx.from.id);
+
+    if (!isActiveSubscription(subscription)) {
+      return ctx.reply(
+        "Ton abonnement n’est plus actif.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("♻️ Renouveler", "renew")],
+        ])
+      );
+    }
+
+    try {
+      const link = await createVipInvite(ctx.from.id);
+      return ctx.reply(
+        `🔐 Voici ton lien personnel. Il est utilisable une seule fois et expire dans ${INVITE_MINUTES} minutes.`,
+        Markup.inlineKeyboard([[Markup.button.url("👑 REJOINDRE LE VIP", link)]])
+      );
+    } catch (error) {
+      console.error("create invite:", error);
+      return ctx.reply(
+        "⚠️ Impossible de générer le lien VIP pour le moment. Vérifie les droits administrateur du bot sur le canal VIP."
+      );
+    }
+  });
+
+  instance.action(/^method:(initial|renewal):(paypal|paysafecard|yonibet)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const [, kind, method] = ctx.match;
+    await showMethodInstructions(ctx, kind, method);
+  });
+
+  instance.action(/^proof:(initial|renewal):(paypal|paysafecard|yonibet)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    await ensureUser(ctx);
+    const [, kind, method] = ctx.match;
+
+    if (kind === "renewal" && method === "yonibet") {
+      return ctx.reply("Yonibet n’est pas disponible pour les renouvellements.");
+    }
+
+    const subscription = await getSubscription(ctx.from.id);
+    if (kind === "initial" && method === "yonibet" && subscription) {
+      return ctx.reply(
+        "L’affiliation Yonibet est réservée à la première souscription. Pour renouveler, utilise PayPal ou Paysafecard."
+      );
+    }
+
+    await query(
+      `INSERT INTO sessions (telegram_id, state, method, kind, updated_at)
+       VALUES ($1, 'awaiting_proof', $2, $3, NOW())
+       ON CONFLICT (telegram_id)
+       DO UPDATE SET state = 'awaiting_proof',
+                     method = EXCLUDED.method,
+                     kind = EXCLUDED.kind,
+                     updated_at = NOW()`,
+      [ctx.from.id, method, kind]
+    );
+
+    await ctx.reply(
+      "📎 Envoie maintenant ta preuve dans ce chat.\n\nFormats acceptés : capture/photo, PDF ou texte.\n\n⚠️ Ne transmets jamais de pièce d’identité ni le PIN/code complet d’une Paysafecard.\n\nTape /cancel pour annuler."
+    );
+  });
+
+  instance.action(/^approve:(\d+)$/, async (ctx) => {
+    if (!adminAllowed(ctx)) {
+      return ctx.answerCbQuery("Action non autorisée.", { show_alert: true });
+    }
+
+    await ctx.answerCbQuery("Validation en cours…");
+    const requestId = ctx.match[1];
+    const approved = await approveRequest(requestId, ctx.from.id);
+
+    if (!approved) {
+      return ctx.answerCbQuery("Cette demande a déjà été traitée.", {
+        show_alert: true,
+      }).catch(() => {});
+    }
+
+    let link = null;
+    try {
+      link = await createVipInvite(approved.request.telegram_id);
+    } catch (error) {
+      console.error("invite after approval:", error.message);
+    }
+
+    const userMessage =
+      `✅ <b>VIP validé !</b>\n\nTon accès est actif jusqu’au <b>${escapeHtml(
+        formatDate(approved.expiresAt)
+      )}</b>.`;
+
+    try {
+      if (link) {
+        await bot.telegram.sendMessage(
+          approved.request.telegram_id,
+          userMessage +
+            `\n\nTon lien est personnel, utilisable une seule fois et valable ${INVITE_MINUTES} minutes.`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+              [Markup.button.url("👑 REJOINDRE LE VIP", link)],
+              [Markup.button.callback("📅 Mon abonnement", "status")],
+            ]),
+          }
+        );
+      } else {
+        await bot.telegram.sendMessage(
+          approved.request.telegram_id,
+          userMessage +
+            "\n\nTon abonnement est bien activé, mais le lien du canal n’a pas pu être généré. Contacte un administrateur.",
+          { parse_mode: "HTML" }
+        );
+      }
+    } catch (error) {
+      console.error("notify approved user:", error.message);
+    }
+
+    await ctx.editMessageText(
+      `✅ Demande #${requestId} validée par ${escapeHtml(
+        ctx.from.first_name || "un admin"
+      )}.\nExpiration : ${escapeHtml(formatDate(approved.expiresAt))}`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+  });
+
+  instance.action(/^reject:(\d+)$/, async (ctx) => {
+    if (!adminAllowed(ctx)) {
+      return ctx.answerCbQuery("Action non autorisée.", { show_alert: true });
+    }
+
+    await ctx.answerCbQuery("Demande refusée.");
+    const requestId = ctx.match[1];
+    const rejected = await rejectRequest(requestId, ctx.from.id);
+
+    if (!rejected) {
+      return ctx.answerCbQuery("Cette demande a déjà été traitée.", {
+        show_alert: true,
+      }).catch(() => {});
+    }
+
+    try {
+      await bot.telegram.sendMessage(
+        rejected.telegram_id,
+        "❌ Ta preuve n’a pas été validée. Tu peux recommencer l’envoi ou contacter un administrateur.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("🔁 Recommencer", rejected.kind === "renewal" ? "renew" : "subscribe")],
+        ])
+      );
+    } catch (error) {
+      console.error("notify rejected user:", error.message);
+    }
+
+    await ctx.editMessageText(
+      `❌ Demande #${requestId} refusée par ${escapeHtml(
+        ctx.from.first_name || "un admin"
+      )}.`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+  });
+
+  instance.on("message", async (ctx, next) => {
+    await ensureUser(ctx);
+    const handled = await handleProofMessage(ctx);
+    if (!handled && typeof next === "function") return next();
+  });
+
+  instance.catch((error, ctx) => {
+    console.error("Telegram bot error:", error);
+    if (ctx?.chat?.id) {
+      ctx.reply("⚠️ Une erreur est survenue. Réessaie dans quelques instants.").catch(() => {});
+    }
+  });
+}
+
+app.get("/", (_req, res) => {
+  res
+    .status(200)
+    .send("VIP Telegram Bot — service en ligne");
+});
+
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    botConfigured: Boolean(BOT_TOKEN),
+    databaseConfigured: Boolean(DATABASE_URL),
+    adminChatConfigured: Boolean(ADMIN_CHAT_ID),
+    vipChatConfigured: Boolean(VIP_CHAT_ID),
+    publicUrlConfigured: Boolean(PUBLIC_URL),
+  });
+});
+
+async function start() {
+  await initDb();
+
+  if (BOT_TOKEN) {
+    bot = new Telegraf(BOT_TOKEN);
+    registerBotHandlers(bot);
+    app.use(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
+  }
+
+  app.listen(PORT, async () => {
+    console.log(`HTTP server listening on port ${PORT}`);
+
+    if (!bot) {
+      console.log("BOT_TOKEN missing — waiting for configuration.");
+      return;
+    }
+
+    try {
+      if (PUBLIC_URL) {
+        await bot.telegram.setWebhook(`${PUBLIC_URL}${WEBHOOK_PATH}`, {
+          drop_pending_updates: false,
+        });
+        console.log("Telegram webhook configured.");
+      } else {
+        await bot.launch();
+        console.log("Telegram bot started in polling mode.");
+      }
+
+      await sweepExpirations();
+      await sendRenewalReminders();
+
+      setInterval(async () => {
+        try {
+          await sweepExpirations();
+          await sendRenewalReminders();
+        } catch (error) {
+          console.error("scheduled sweep:", error);
+        }
+      }, 60 * 1000);
+    } catch (error) {
+      console.error("Telegram startup error:", error);
+    }
+  });
+}
+
+start().catch((error) => {
+  console.error("Fatal startup error:", error);
+  process.exit(1);
+});
+
+process.once("SIGINT", () => bot?.stop("SIGINT"));
+process.once("SIGTERM", () => bot?.stop("SIGTERM"));
