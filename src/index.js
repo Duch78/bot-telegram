@@ -804,7 +804,7 @@ async function start() {
   if (BOT_TOKEN) {
     bot = new Telegraf(BOT_TOKEN);
     registerBotHandlers(bot);
-    app.use(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
+    app.use(bot.webhookCallback(WEBHOOK_PATH));
   }
 
   app.listen(PORT, async () => {
