@@ -2,11 +2,9 @@ require("dotenv").config();
 
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
-const { Pool } = require("pg");
 
 const PORT = Number(process.env.PORT || 10000);
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
-const DATABASE_URL = process.env.DATABASE_URL || "";
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || "";
 const VIP_CHAT_ID = process.env.VIP_CHAT_ID || "";
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
@@ -19,6 +17,9 @@ const YONIBET_URL = process.env.YONIBET_URL || "";
 const VIP_PRICE_TEXT = process.env.VIP_PRICE_TEXT || "Tarif communiqué par l’administrateur";
 const VIP_DAYS = Number(process.env.VIP_DAYS || 30);
 const INVITE_MINUTES = Number(process.env.INVITE_MINUTES || 15);
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
+const SUPABASE_VIP_SECRET = process.env.SUPABASE_VIP_SECRET || "";
 const ADMIN_USER_IDS = new Set(
   (process.env.ADMIN_USER_IDS || "")
     .split(",")
@@ -29,15 +30,7 @@ const ADMIN_USER_IDS = new Set(
 const app = express();
 app.use(express.json({ limit: "15mb" }));
 
-let pool = null;
 let bot = null;
-
-if (DATABASE_URL) {
-  pool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
-  });
-}
 
 function escapeHtml(value = "") {
   return String(value)
@@ -66,82 +59,63 @@ function formatDate(date) {
   }).format(new Date(date));
 }
 
-async function query(text, params = []) {
-  if (!pool) throw new Error("DATABASE_URL manquant");
-  return pool.query(text, params);
+function supabaseConfigured() {
+  return Boolean(SUPABASE_URL && SUPABASE_KEY && SUPABASE_VIP_SECRET);
 }
 
-async function initDb() {
-  if (!pool) return;
+async function db(action, payload = {}) {
+  if (!supabaseConfigured()) {
+    throw new Error("Configuration Supabase incomplète");
+  }
 
-  await query(`
-    CREATE TABLE IF NOT EXISTS users (
-      telegram_id BIGINT PRIMARY KEY,
-      username TEXT,
-      first_name TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/vip_bot_api`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      p_action: action,
+      p_secret: SUPABASE_VIP_SECRET,
+      p_payload: payload,
+    }),
+  });
+
+  const text = await response.text();
+  let data = null;
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Supabase RPC failed (${response.status}): ${typeof data === "string" ? data : JSON.stringify(data)}`
     );
+  }
 
-    CREATE TABLE IF NOT EXISTS subscriptions (
-      telegram_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
-      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      expires_at TIMESTAMPTZ NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active',
-      reminder_sent_at TIMESTAMPTZ,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS sessions (
-      telegram_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
-      state TEXT NOT NULL,
-      method TEXT,
-      kind TEXT,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS requests (
-      id BIGSERIAL PRIMARY KEY,
-      telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-      method TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      admin_message_id BIGINT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      reviewed_at TIMESTAMPTZ,
-      reviewed_by BIGINT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_subscriptions_expiry
-      ON subscriptions(status, expires_at);
-
-    CREATE INDEX IF NOT EXISTS idx_requests_status
-      ON requests(status, created_at);
-  `);
+  return data;
 }
 
 async function ensureUser(ctx) {
   const from = ctx.from;
-  if (!from || !pool) return;
+  if (!from || !supabaseConfigured()) return;
 
-  await query(
-    `INSERT INTO users (telegram_id, username, first_name, updated_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (telegram_id)
-     DO UPDATE SET username = EXCLUDED.username,
-                   first_name = EXCLUDED.first_name,
-                   updated_at = NOW()`,
-    [from.id, from.username || null, from.first_name || null]
-  );
+  await db("ensure_user", {
+    telegram_id: from.id,
+    username: from.username || "",
+    first_name: from.first_name || "",
+  });
 }
 
 async function getSubscription(telegramId) {
-  if (!pool) return null;
-  const result = await query(
-    "SELECT * FROM subscriptions WHERE telegram_id = $1",
-    [telegramId]
-  );
-  return result.rows[0] || null;
+  if (!supabaseConfigured()) return null;
+  return db("get_subscription", { telegram_id: telegramId });
 }
 
 function isActiveSubscription(subscription) {
@@ -155,9 +129,9 @@ function isActiveSubscription(subscription) {
 async function showHome(ctx) {
   await ensureUser(ctx);
 
-  if (!pool) {
+  if (!supabaseConfigured()) {
     return ctx.reply(
-      "⚙️ Le bot est installé mais la base de données n’est pas encore configurée."
+      "⚙️ Le bot est installé mais Supabase n’est pas encore configuré."
     );
   }
 
@@ -191,7 +165,10 @@ async function showHome(ctx) {
     )}</b>\nDurée : <b>${VIP_DAYS} jours</b>.\n\nChoisis ci-dessous pour commencer.`,
     {
       parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[button], [Markup.button.callback("❓ Comment ça marche ?", "help")]]),
+      ...Markup.inlineKeyboard([
+        [button],
+        [Markup.button.callback("❓ Comment ça marche ?", "help")],
+      ]),
     }
   );
 }
@@ -267,7 +244,12 @@ async function showMethodInstructions(ctx, kind, method) {
       `proof:${kind}:${method}`
     ),
   ]);
-  buttons.push([Markup.button.callback("⬅️ Retour", kind === "renewal" ? "renew" : "subscribe")]);
+  buttons.push([
+    Markup.button.callback(
+      "⬅️ Retour",
+      kind === "renewal" ? "renew" : "subscribe"
+    ),
+  ]);
 
   return ctx.reply(text, {
     parse_mode: "HTML",
@@ -298,86 +280,30 @@ async function createVipInvite(telegramId) {
 }
 
 async function approveRequest(requestId, reviewerId) {
-  const client = await pool.connect();
+  const result = await db("approve_request", {
+    request_id: requestId,
+    reviewer_id: reviewerId,
+    vip_days: VIP_DAYS,
+  });
 
-  try {
-    await client.query("BEGIN");
+  if (!result) return null;
 
-    const requestResult = await client.query(
-      "SELECT * FROM requests WHERE id = $1 FOR UPDATE",
-      [requestId]
-    );
-    const request = requestResult.rows[0];
-
-    if (!request || request.status !== "pending") {
-      await client.query("ROLLBACK");
-      return null;
-    }
-
-    const subscriptionResult = await client.query(
-      "SELECT * FROM subscriptions WHERE telegram_id = $1 FOR UPDATE",
-      [request.telegram_id]
-    );
-    const existing = subscriptionResult.rows[0];
-
-    const now = new Date();
-    let base = now;
-
-    if (
-      existing &&
-      existing.status === "active" &&
-      new Date(existing.expires_at).getTime() > now.getTime()
-    ) {
-      base = new Date(existing.expires_at);
-    }
-
-    const expiresAt = new Date(
-      base.getTime() + VIP_DAYS * 24 * 60 * 60 * 1000
-    );
-
-    await client.query(
-      `INSERT INTO subscriptions
-        (telegram_id, started_at, expires_at, status, reminder_sent_at, updated_at)
-       VALUES ($1, NOW(), $2, 'active', NULL, NOW())
-       ON CONFLICT (telegram_id)
-       DO UPDATE SET expires_at = EXCLUDED.expires_at,
-                     status = 'active',
-                     reminder_sent_at = NULL,
-                     updated_at = NOW()`,
-      [request.telegram_id, expiresAt]
-    );
-
-    await client.query(
-      `UPDATE requests
-       SET status = 'approved', reviewed_at = NOW(), reviewed_by = $2
-       WHERE id = $1`,
-      [requestId, reviewerId]
-    );
-
-    await client.query("COMMIT");
-
-    return { request, expiresAt };
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
+  return {
+    request: result.request,
+    expiresAt: result.expires_at,
+  };
 }
 
 async function rejectRequest(requestId, reviewerId) {
-  const result = await query(
-    `UPDATE requests
-     SET status = 'rejected', reviewed_at = NOW(), reviewed_by = $2
-     WHERE id = $1 AND status = 'pending'
-     RETURNING *`,
-    [requestId, reviewerId]
-  );
-  return result.rows[0] || null;
+  return db("reject_request", {
+    request_id: requestId,
+    reviewer_id: reviewerId,
+  });
 }
 
 function adminAllowed(ctx) {
   const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
+
   if (
     ADMIN_CHAT_ID &&
     callbackChatId &&
@@ -394,13 +320,13 @@ function adminAllowed(ctx) {
 }
 
 async function handleProofMessage(ctx) {
-  if (!pool || !ADMIN_CHAT_ID || !ctx.from || !ctx.message) return false;
+  if (!supabaseConfigured() || !ADMIN_CHAT_ID || !ctx.from || !ctx.message) {
+    return false;
+  }
 
-  const sessionResult = await query(
-    "SELECT * FROM sessions WHERE telegram_id = $1",
-    [ctx.from.id]
-  );
-  const session = sessionResult.rows[0];
+  const session = await db("get_session", {
+    telegram_id: ctx.from.id,
+  });
 
   if (!session || session.state !== "awaiting_proof") return false;
 
@@ -410,22 +336,27 @@ async function handleProofMessage(ctx) {
     Boolean(ctx.message.text);
 
   if (!allowed) {
-    await ctx.reply("Envoie une capture, une photo, un PDF ou un message texte comme preuve.");
+    await ctx.reply(
+      "Envoie une capture, une photo, un PDF ou un message texte comme preuve."
+    );
     return true;
   }
 
-  const requestResult = await query(
-    `INSERT INTO requests (telegram_id, method, kind, status)
-     VALUES ($1, $2, $3, 'pending')
-     RETURNING *`,
-    [ctx.from.id, session.method, session.kind]
-  );
-  const request = requestResult.rows[0];
+  const request = await db("create_request", {
+    telegram_id: ctx.from.id,
+    method: session.method,
+    kind: session.kind,
+  });
 
-  const username = ctx.from.username ? `@${ctx.from.username}` : "sans @username";
+  const username = ctx.from.username
+    ? `@${ctx.from.username}`
+    : "sans @username";
+
   const header =
     `🧾 <b>Nouvelle demande VIP #${request.id}</b>\n\n` +
-    `👤 ${escapeHtml(ctx.from.first_name || "Utilisateur")} (${escapeHtml(username)})\n` +
+    `👤 ${escapeHtml(ctx.from.first_name || "Utilisateur")} (${escapeHtml(
+      username
+    )})\n` +
     `🆔 <code>${ctx.from.id}</code>\n` +
     `💳 ${escapeHtml(methodLabel(session.method))}\n` +
     `📌 ${escapeHtml(kindLabel(session.kind))}\n\n` +
@@ -447,10 +378,7 @@ async function handleProofMessage(ctx) {
     await bot.telegram.copyMessage(
       ADMIN_CHAT_ID,
       ctx.chat.id,
-      ctx.message.message_id,
-      {
-        reply_parameters: { message_id: adminMessage.message_id },
-      }
+      ctx.message.message_id
     );
   } catch (error) {
     console.error("copy proof:", error.message);
@@ -460,11 +388,14 @@ async function handleProofMessage(ctx) {
     );
   }
 
-  await query(
-    "UPDATE requests SET admin_message_id = $2 WHERE id = $1",
-    [request.id, adminMessage.message_id]
-  );
-  await query("DELETE FROM sessions WHERE telegram_id = $1", [ctx.from.id]);
+  await db("set_admin_message", {
+    request_id: request.id,
+    admin_message_id: adminMessage.message_id,
+  });
+
+  await db("delete_session", {
+    telegram_id: ctx.from.id,
+  });
 
   await ctx.reply(
     "✅ Ta preuve a bien été envoyée aux administrateurs. Tu recevras ici le résultat de la validation."
@@ -474,35 +405,31 @@ async function handleProofMessage(ctx) {
 }
 
 async function sweepExpirations() {
-  if (!pool || !bot || !VIP_CHAT_ID) return;
+  if (!supabaseConfigured() || !bot || !VIP_CHAT_ID) return;
 
-  const result = await query(
-    `SELECT telegram_id, expires_at
-     FROM subscriptions
-     WHERE status = 'active' AND expires_at <= NOW()
-     ORDER BY expires_at ASC
-     LIMIT 100`
-  );
+  const rows = (await db("list_expired")) || [];
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     try {
       await bot.telegram.banChatMember(VIP_CHAT_ID, row.telegram_id, {
         revoke_messages: false,
       });
+
       await bot.telegram.unbanChatMember(VIP_CHAT_ID, row.telegram_id, {
         only_if_banned: true,
       });
     } catch (error) {
-      console.error("remove expired member:", row.telegram_id, error.message);
+      console.error(
+        "remove expired member:",
+        row.telegram_id,
+        error.message
+      );
       continue;
     }
 
-    await query(
-      `UPDATE subscriptions
-       SET status = 'expired', updated_at = NOW()
-       WHERE telegram_id = $1 AND status = 'active'`,
-      [row.telegram_id]
-    );
+    await db("mark_expired", {
+      telegram_id: row.telegram_id,
+    });
 
     try {
       await bot.telegram.sendMessage(
@@ -519,32 +446,25 @@ async function sweepExpirations() {
 }
 
 async function sendRenewalReminders() {
-  if (!pool || !bot) return;
+  if (!supabaseConfigured() || !bot) return;
 
-  const result = await query(
-    `SELECT telegram_id, expires_at
-     FROM subscriptions
-     WHERE status = 'active'
-       AND expires_at > NOW()
-       AND expires_at <= NOW() + INTERVAL '3 days'
-       AND reminder_sent_at IS NULL
-     LIMIT 100`
-  );
+  const rows = (await db("list_reminders")) || [];
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     try {
       await bot.telegram.sendMessage(
         row.telegram_id,
-        `⏰ Ton VIP expire le ${formatDate(row.expires_at)}. Tu peux le renouveler dès maintenant sans perdre les jours restants.`,
+        `⏰ Ton VIP expire le ${formatDate(
+          row.expires_at
+        )}. Tu peux le renouveler dès maintenant sans perdre les jours restants.`,
         Markup.inlineKeyboard([
           [Markup.button.callback("♻️ Renouveler mon VIP", "renew")],
         ])
       );
 
-      await query(
-        "UPDATE subscriptions SET reminder_sent_at = NOW() WHERE telegram_id = $1",
-        [row.telegram_id]
-      );
+      await db("mark_reminder", {
+        telegram_id: row.telegram_id,
+      });
     } catch (error) {
       console.warn("renewal reminder:", row.telegram_id, error.message);
     }
@@ -554,11 +474,16 @@ async function sendRenewalReminders() {
 function registerBotHandlers(instance) {
   instance.start(showHome);
   instance.command("menu", showHome);
+
   instance.command("cancel", async (ctx) => {
     await ensureUser(ctx);
-    if (pool) {
-      await query("DELETE FROM sessions WHERE telegram_id = $1", [ctx.from.id]);
+
+    if (supabaseConfigured()) {
+      await db("delete_session", {
+        telegram_id: ctx.from.id,
+      });
     }
+
     await ctx.reply("Action annulée.");
     await showHome(ctx);
   });
@@ -590,6 +515,7 @@ function registerBotHandlers(instance) {
   instance.action("status", async (ctx) => {
     await ctx.answerCbQuery();
     const subscription = await getSubscription(ctx.from.id);
+
     if (!isActiveSubscription(subscription)) {
       return ctx.reply(
         "Ton VIP n’est pas actif.",
@@ -598,6 +524,7 @@ function registerBotHandlers(instance) {
         ])
       );
     }
+
     return ctx.reply(
       `👑 VIP actif jusqu’au <b>${escapeHtml(
         formatDate(subscription.expires_at)
@@ -621,72 +548,88 @@ function registerBotHandlers(instance) {
 
     try {
       const link = await createVipInvite(ctx.from.id);
+
       return ctx.reply(
         `🔐 Voici ton lien personnel. Il est utilisable une seule fois et expire dans ${INVITE_MINUTES} minutes.`,
-        Markup.inlineKeyboard([[Markup.button.url("👑 REJOINDRE LE VIP", link)]])
+        Markup.inlineKeyboard([
+          [Markup.button.url("👑 REJOINDRE LE VIP", link)],
+        ])
       );
     } catch (error) {
       console.error("create invite:", error);
+
       return ctx.reply(
         "⚠️ Impossible de générer le lien VIP pour le moment. Vérifie les droits administrateur du bot sur le canal VIP."
       );
     }
   });
 
-  instance.action(/^method:(initial|renewal):(paypal|paysafecard|yonibet)$/, async (ctx) => {
-    await ctx.answerCbQuery();
-    const [, kind, method] = ctx.match;
-    await showMethodInstructions(ctx, kind, method);
-  });
-
-  instance.action(/^proof:(initial|renewal):(paypal|paysafecard|yonibet)$/, async (ctx) => {
-    await ctx.answerCbQuery();
-    await ensureUser(ctx);
-    const [, kind, method] = ctx.match;
-
-    if (kind === "renewal" && method === "yonibet") {
-      return ctx.reply("Yonibet n’est pas disponible pour les renouvellements.");
+  instance.action(
+    /^method:(initial|renewal):(paypal|paysafecard|yonibet)$/,
+    async (ctx) => {
+      await ctx.answerCbQuery();
+      const [, kind, method] = ctx.match;
+      await showMethodInstructions(ctx, kind, method);
     }
+  );
 
-    const subscription = await getSubscription(ctx.from.id);
-    if (kind === "initial" && method === "yonibet" && subscription) {
-      return ctx.reply(
-        "L’affiliation Yonibet est réservée à la première souscription. Pour renouveler, utilise PayPal ou Paysafecard."
+  instance.action(
+    /^proof:(initial|renewal):(paypal|paysafecard|yonibet)$/,
+    async (ctx) => {
+      await ctx.answerCbQuery();
+      await ensureUser(ctx);
+
+      const [, kind, method] = ctx.match;
+
+      if (kind === "renewal" && method === "yonibet") {
+        return ctx.reply(
+          "Yonibet n’est pas disponible pour les renouvellements."
+        );
+      }
+
+      const subscription = await getSubscription(ctx.from.id);
+
+      if (kind === "initial" && method === "yonibet" && subscription) {
+        return ctx.reply(
+          "L’affiliation Yonibet est réservée à la première souscription. Pour renouveler, utilise PayPal ou Paysafecard."
+        );
+      }
+
+      await db("set_session", {
+        telegram_id: ctx.from.id,
+        state: "awaiting_proof",
+        method,
+        kind,
+      });
+
+      await ctx.reply(
+        "📎 Envoie maintenant ta preuve dans ce chat.\n\nFormats acceptés : capture/photo, PDF ou texte.\n\n⚠️ Ne transmets jamais de pièce d’identité ni le PIN/code complet d’une Paysafecard.\n\nTape /cancel pour annuler."
       );
     }
-
-    await query(
-      `INSERT INTO sessions (telegram_id, state, method, kind, updated_at)
-       VALUES ($1, 'awaiting_proof', $2, $3, NOW())
-       ON CONFLICT (telegram_id)
-       DO UPDATE SET state = 'awaiting_proof',
-                     method = EXCLUDED.method,
-                     kind = EXCLUDED.kind,
-                     updated_at = NOW()`,
-      [ctx.from.id, method, kind]
-    );
-
-    await ctx.reply(
-      "📎 Envoie maintenant ta preuve dans ce chat.\n\nFormats acceptés : capture/photo, PDF ou texte.\n\n⚠️ Ne transmets jamais de pièce d’identité ni le PIN/code complet d’une Paysafecard.\n\nTape /cancel pour annuler."
-    );
-  });
+  );
 
   instance.action(/^approve:(\d+)$/, async (ctx) => {
     if (!adminAllowed(ctx)) {
-      return ctx.answerCbQuery("Action non autorisée.", { show_alert: true });
+      return ctx.answerCbQuery("Action non autorisée.", {
+        show_alert: true,
+      });
     }
 
     await ctx.answerCbQuery("Validation en cours…");
+
     const requestId = ctx.match[1];
     const approved = await approveRequest(requestId, ctx.from.id);
 
     if (!approved) {
-      return ctx.answerCbQuery("Cette demande a déjà été traitée.", {
-        show_alert: true,
-      }).catch(() => {});
+      return ctx
+        .answerCbQuery("Cette demande a déjà été traitée.", {
+          show_alert: true,
+        })
+        .catch(() => {});
     }
 
     let link = null;
+
     try {
       link = await createVipInvite(approved.request.telegram_id);
     } catch (error) {
@@ -724,27 +667,36 @@ function registerBotHandlers(instance) {
       console.error("notify approved user:", error.message);
     }
 
-    await ctx.editMessageText(
-      `✅ Demande #${requestId} validée par ${escapeHtml(
-        ctx.from.first_name || "un admin"
-      )}.\nExpiration : ${escapeHtml(formatDate(approved.expiresAt))}`,
-      { parse_mode: "HTML" }
-    ).catch(() => {});
+    await ctx
+      .editMessageText(
+        `✅ Demande #${requestId} validée par ${escapeHtml(
+          ctx.from.first_name || "un admin"
+        )}.\nExpiration : ${escapeHtml(
+          formatDate(approved.expiresAt)
+        )}`,
+        { parse_mode: "HTML" }
+      )
+      .catch(() => {});
   });
 
   instance.action(/^reject:(\d+)$/, async (ctx) => {
     if (!adminAllowed(ctx)) {
-      return ctx.answerCbQuery("Action non autorisée.", { show_alert: true });
+      return ctx.answerCbQuery("Action non autorisée.", {
+        show_alert: true,
+      });
     }
 
     await ctx.answerCbQuery("Demande refusée.");
+
     const requestId = ctx.match[1];
     const rejected = await rejectRequest(requestId, ctx.from.id);
 
     if (!rejected) {
-      return ctx.answerCbQuery("Cette demande a déjà été traitée.", {
-        show_alert: true,
-      }).catch(() => {});
+      return ctx
+        .answerCbQuery("Cette demande a déjà été traitée.", {
+          show_alert: true,
+        })
+        .catch(() => {});
     }
 
     try {
@@ -752,46 +704,69 @@ function registerBotHandlers(instance) {
         rejected.telegram_id,
         "❌ Ta preuve n’a pas été validée. Tu peux recommencer l’envoi ou contacter un administrateur.",
         Markup.inlineKeyboard([
-          [Markup.button.callback("🔁 Recommencer", rejected.kind === "renewal" ? "renew" : "subscribe")],
+          [
+            Markup.button.callback(
+              "🔁 Recommencer",
+              rejected.kind === "renewal" ? "renew" : "subscribe"
+            ),
+          ],
         ])
       );
     } catch (error) {
       console.error("notify rejected user:", error.message);
     }
 
-    await ctx.editMessageText(
-      `❌ Demande #${requestId} refusée par ${escapeHtml(
-        ctx.from.first_name || "un admin"
-      )}.`,
-      { parse_mode: "HTML" }
-    ).catch(() => {});
+    await ctx
+      .editMessageText(
+        `❌ Demande #${requestId} refusée par ${escapeHtml(
+          ctx.from.first_name || "un admin"
+        )}.`,
+        { parse_mode: "HTML" }
+      )
+      .catch(() => {});
   });
 
   instance.on("message", async (ctx, next) => {
     await ensureUser(ctx);
     const handled = await handleProofMessage(ctx);
-    if (!handled && typeof next === "function") return next();
+
+    if (!handled && typeof next === "function") {
+      return next();
+    }
   });
 
   instance.catch((error, ctx) => {
     console.error("Telegram bot error:", error);
+
     if (ctx?.chat?.id) {
-      ctx.reply("⚠️ Une erreur est survenue. Réessaie dans quelques instants.").catch(() => {});
+      ctx
+        .reply("⚠️ Une erreur est survenue. Réessaie dans quelques instants.")
+        .catch(() => {});
     }
   });
 }
 
 app.get("/", (_req, res) => {
-  res
-    .status(200)
-    .send("VIP Telegram Bot — service en ligne");
+  res.status(200).send("VIP Telegram Bot — service en ligne");
 });
 
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
+  let supabaseOk = false;
+
+  if (supabaseConfigured()) {
+    try {
+      const health = await db("health");
+      supabaseOk = Boolean(health?.ok);
+    } catch (error) {
+      console.error("health supabase:", error.message);
+    }
+  }
+
   res.status(200).json({
     ok: true,
     botConfigured: Boolean(BOT_TOKEN),
-    databaseConfigured: Boolean(DATABASE_URL),
+    supabaseConfigured: supabaseConfigured(),
+    supabaseOk,
     adminChatConfigured: Boolean(ADMIN_CHAT_ID),
     vipChatConfigured: Boolean(VIP_CHAT_ID),
     publicUrlConfigured: Boolean(PUBLIC_URL),
@@ -799,7 +774,16 @@ app.get("/health", (_req, res) => {
 });
 
 async function start() {
-  await initDb();
+  if (supabaseConfigured()) {
+    try {
+      const health = await db("health");
+      console.log("Supabase storage ready:", Boolean(health?.ok));
+    } catch (error) {
+      console.error("Supabase startup error:", error.message);
+    }
+  } else {
+    console.log("Supabase configuration missing.");
+  }
 
   if (BOT_TOKEN) {
     bot = new Telegraf(BOT_TOKEN);
