@@ -9,11 +9,11 @@ const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || "";
 const VIP_CHAT_ID = process.env.VIP_CHAT_ID || "";
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/telegram/webhook";
-const PAYPAL_URL = process.env.PAYPAL_URL || "";
+const PAYPAL_URL = process.env.PAYPAL_URL || "https://www.paypal.com/qrcodes/p2pqrc/7S3RLYNYG8EL2";
 const PAYSAFECARD_TEXT =
   process.env.PAYSAFECARD_TEXT ||
   "Effectue ton paiement Paysafecard selon les instructions de l’administrateur, puis envoie uniquement une preuve du paiement.";
-const YONIBET_URL = process.env.YONIBET_URL || "";
+const YONIBET_URL = process.env.YONIBET_URL || "https://tinyurl.com/NASSRIxYONIBET";
 const VIP_PRICE_TEXT = process.env.VIP_PRICE_TEXT || "Tarif communiqué par l’administrateur";
 const VIP_DAYS = Number(process.env.VIP_DAYS || 30);
 const INVITE_MINUTES = Number(process.env.INVITE_MINUTES || 15);
@@ -59,47 +59,58 @@ function formatDate(date) {
   }).format(new Date(date));
 }
 
+const memory = {
+  users: new Map(),
+  subscriptions: new Map(),
+  sessions: new Map(),
+  requests: new Map(),
+  nextRequestId: 1,
+};
+
 function supabaseConfigured() {
-  return Boolean(SUPABASE_URL && SUPABASE_KEY && SUPABASE_VIP_SECRET);
+  return true;
 }
 
 async function db(action, payload = {}) {
-  if (!supabaseConfigured()) {
-    throw new Error("Configuration Supabase incomplète");
+  const uid = payload.telegram_id != null ? String(payload.telegram_id) : null;
+  if (action === "health") return { ok: true, storage: "memory" };
+  if (action === "ensure_user") { memory.users.set(uid, { ...payload }); return { ok: true }; }
+  if (action === "get_subscription") return memory.subscriptions.get(uid) || null;
+  if (action === "set_session") { memory.sessions.set(uid, { ...payload }); return { ok: true }; }
+  if (action === "get_session") return memory.sessions.get(uid) || null;
+  if (action === "delete_session") { memory.sessions.delete(uid); return { ok: true }; }
+  if (action === "create_request") {
+    const request = { id: memory.nextRequestId++, telegram_id: Number(payload.telegram_id), method: payload.method, kind: payload.kind, status: "pending", created_at: new Date().toISOString() };
+    memory.requests.set(String(request.id), request);
+    return request;
   }
-
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/vip_bot_api`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      p_action: action,
-      p_secret: SUPABASE_VIP_SECRET,
-      p_payload: payload,
-    }),
-  });
-
-  const text = await response.text();
-  let data = null;
-
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = text;
-    }
+  if (action === "set_admin_message") { const request = memory.requests.get(String(payload.request_id)); if (request) request.admin_message_id = Number(payload.admin_message_id); return { ok: true }; }
+  if (action === "approve_request") {
+    const request = memory.requests.get(String(payload.request_id));
+    if (!request || request.status !== "pending") return null;
+    const key = String(request.telegram_id);
+    const current = memory.subscriptions.get(key);
+    const now = Date.now();
+    const currentExpiry = current ? new Date(current.expires_at).getTime() : 0;
+    const base = current && current.status === "active" && currentExpiry > now ? currentExpiry : now;
+    const expiresAt = new Date(base + Number(payload.vip_days || 30) * 86400000).toISOString();
+    memory.subscriptions.set(key, { telegram_id: request.telegram_id, expires_at: expiresAt, status: "active", reminder_sent_at: null });
+    request.status = "approved";
+    request.reviewed_by = Number(payload.reviewer_id);
+    request.reviewed_at = new Date().toISOString();
+    return { request: { ...request }, expires_at: expiresAt };
   }
-
-  if (!response.ok) {
-    throw new Error(
-      `Supabase RPC failed (${response.status}): ${typeof data === "string" ? data : JSON.stringify(data)}`
-    );
+  if (action === "reject_request") {
+    const request = memory.requests.get(String(payload.request_id));
+    if (!request || request.status !== "pending") return null;
+    request.status = "rejected";
+    request.reviewed_by = Number(payload.reviewer_id);
+    request.reviewed_at = new Date().toISOString();
+    return { ...request };
   }
-
-  return data;
+  if (action === "list_expired" || action === "list_reminders") return [];
+  if (action === "mark_expired" || action === "mark_reminder") return { ok: true };
+  throw new Error("Unknown memory action: " + action);
 }
 
 async function ensureUser(ctx) {
@@ -750,40 +761,19 @@ app.get("/", (_req, res) => {
   res.status(200).send("VIP Telegram Bot — service en ligne");
 });
 
-app.get("/health", async (_req, res) => {
-  let supabaseOk = false;
-
-  if (supabaseConfigured()) {
-    try {
-      const health = await db("health");
-      supabaseOk = Boolean(health?.ok);
-    } catch (error) {
-      console.error("health supabase:", error.message);
-    }
-  }
-
+app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
     botConfigured: Boolean(BOT_TOKEN),
-    supabaseConfigured: supabaseConfigured(),
-    supabaseOk,
     adminChatConfigured: Boolean(ADMIN_CHAT_ID),
     vipChatConfigured: Boolean(VIP_CHAT_ID),
     publicUrlConfigured: Boolean(PUBLIC_URL),
+    storage: "telegram-only",
   });
 });
 
 async function start() {
-  if (supabaseConfigured()) {
-    try {
-      const health = await db("health");
-      console.log("Supabase storage ready:", Boolean(health?.ok));
-    } catch (error) {
-      console.error("Supabase startup error:", error.message);
-    }
-  } else {
-    console.log("Supabase configuration missing.");
-  }
+  console.log("Storage mode: Telegram only — no Supabase.");
 
   if (BOT_TOKEN) {
     bot = new Telegraf(BOT_TOKEN);
