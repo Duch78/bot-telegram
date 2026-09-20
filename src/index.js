@@ -276,11 +276,24 @@ async function showMethodInstructions(ctx, kind, method) {
     if (kind !== "initial") {
       return ctx.answerCbQuery("Yonibet est réservé à la première souscription.");
     }
-    text += YONIBET_URL
-      ? "Inscris-toi via le lien partenaire, remplis les conditions demandées puis reviens envoyer ta preuve."
-      : "Le lien d’affiliation Yonibet sera ajouté prochainement par l’administrateur.";
+
+    text +=
+      "🎁 <b>Conditions pour obtenir le VIP via Yonibet :</b>\n\n" +
+      "1️⃣ Crée ton compte uniquement via le lien partenaire NASSRI ci-dessous.\n" +
+      "2️⃣ Fais vérifier ton compte directement par Yonibet.\n" +
+      "3️⃣ Effectue un dépôt sur ton compte Yonibet.\n" +
+      "4️⃣ Contacte le live chat Yonibet et indique que tu as un code.\n" +
+      "5️⃣ Donne le code <b>NASSRI</b>.\n\n" +
+      "🎁 Code NASSRI : 50 % du dépôt en freebet, selon les conditions Yonibet.\n\n" +
+      "📸 <b>Pour la validation VIP, prépare :</b>\n" +
+      "• une capture montrant que ton compte est vérifié ;\n" +
+      "• une capture de la confirmation de ton dépôt ;\n" +
+      "• une capture du live chat montrant que le code <b>NASSRI</b> a bien été communiqué/confirmé.\n\n" +
+      "⚠️ Ne nous envoie jamais ta pièce d’identité, tes documents KYC, ton mot de passe ni tes données bancaires.\n\n" +
+      "🔞 Yonibet est réservé aux personnes majeures.";
+
     if (YONIBET_URL) {
-      buttons.push([Markup.button.url("🎁 Ouvrir Yonibet", YONIBET_URL)]);
+      buttons.push([Markup.button.url("🎁 S’inscrire sur Yonibet", YONIBET_URL)]);
     }
   }
 
@@ -651,9 +664,23 @@ function registerBotHandlers(instance) {
         kind,
       });
 
-      await ctx.reply(
-        "📎 Envoie maintenant ta preuve dans ce chat.\n\nFormats acceptés : capture/photo, PDF ou texte.\n\n⚠️ Ne transmets jamais de pièce d’identité ni le PIN/code complet d’une Paysafecard.\n\nTape /cancel pour annuler."
-      );
+      if (method === "yonibet") {
+        await ctx.reply(
+          "📎 <b>Envoie maintenant ta preuve Yonibet.</b>\n\n" +
+            "Ta preuve doit permettre aux admins de vérifier :\n" +
+            "✅ que ton compte Yonibet est vérifié ;\n" +
+            "✅ que ton dépôt a été effectué ;\n" +
+            "✅ que tu as contacté le live chat avec le code <b>NASSRI</b>.\n\n" +
+            "Tu peux envoyer une capture complète ou un PDF regroupant les éléments nécessaires.\n\n" +
+            "⚠️ Masque les informations sensibles inutiles. N’envoie jamais ta pièce d’identité, tes documents KYC, ton mot de passe ni tes données bancaires.\n\n" +
+            "Tape /cancel pour annuler.",
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.reply(
+          "📎 Envoie maintenant ta preuve dans ce chat.\n\nFormats acceptés : capture/photo, PDF ou texte.\n\n⚠️ Ne transmets jamais de pièce d’identité ni le PIN/code complet d’une Paysafecard.\n\nTape /cancel pour annuler."
+        );
+      }
     }
   );
 
