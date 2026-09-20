@@ -28,6 +28,7 @@ const app = express();
 app.use(express.json({ limit: "15mb" }));
 
 let bot = null;
+const pendingRejectReasons = new Map();
 
 function escapeHtml(value = "") {
   return String(value)
@@ -86,6 +87,10 @@ async function db(action, payload = {}) {
 
   if (action === "get_subscription") {
     return memorySubscriptions.get(userKey) || null;
+  }
+
+  if (action === "get_request") {
+    return memoryRequests.get(String(payload.request_id)) || null;
   }
 
   if (action === "set_session") {
@@ -730,52 +735,126 @@ function registerBotHandlers(instance) {
       });
     }
 
-    await ctx.answerCbQuery("Demande refusée.");
-
     const requestId = ctx.match[1];
-    const rejected = await rejectRequest(requestId, ctx.from.id);
+    const request = await db("get_request", { request_id: requestId });
+
+    if (!request || request.status !== "pending") {
+      return ctx.answerCbQuery("Cette demande a déjà été traitée.", {
+        show_alert: true,
+      });
+    }
+
+    const chatId = String(ctx.callbackQuery.message.chat.id);
+
+    pendingRejectReasons.set(chatId, {
+      requestId,
+      reviewerId: ctx.from.id,
+      reviewerName: ctx.from.first_name || "un admin",
+    });
+
+    await ctx.answerCbQuery("Écris maintenant la raison du refus.");
+
+    await bot.telegram.sendMessage(
+      ctx.callbackQuery.message.chat.id,
+      `✍️ <b>Motif du refus — demande #${requestId}</b>\n\nÉcris maintenant la raison du refus dans ce canal.\n\n👉 <b>Ton prochain message texte sera envoyé au joueur comme explication.</b>`,
+      { parse_mode: "HTML" }
+    );
+  });
+
+  async function handleRejectReason(ctx, message) {
+    const chatId = String(ctx.chat?.id || message?.chat?.id || "");
+    const pending = pendingRejectReasons.get(chatId);
+
+    if (!pending || !message?.text) return false;
+
+    const reason = message.text.trim();
+    if (!reason) return false;
+
+    const rejected = await rejectRequest(
+      pending.requestId,
+      pending.reviewerId
+    );
+
+    pendingRejectReasons.delete(chatId);
 
     if (!rejected) {
-      return ctx
-        .answerCbQuery("Cette demande a déjà été traitée.", {
-          show_alert: true,
-        })
-        .catch(() => {});
+      await bot.telegram.sendMessage(
+        chatId,
+        "⚠️ Cette demande a déjà été traitée."
+      );
+      return true;
     }
 
     try {
       await bot.telegram.sendMessage(
         rejected.telegram_id,
-        "❌ Ta preuve n’a pas été validée. Tu peux recommencer l’envoi ou contacter un administrateur.",
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback(
-              "🔁 Recommencer",
-              rejected.kind === "renewal" ? "renew" : "subscribe"
-            ),
-          ],
-        ])
+        `❌ <b>Ta demande VIP n’a pas été validée.</b>\n\n📝 <b>Motif :</b> ${escapeHtml(
+          reason
+        )}\n\nTu peux corriger le problème puis recommencer l’envoi.`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                "🔁 Recommencer",
+                rejected.kind === "renewal" ? "renew" : "subscribe"
+              ),
+            ],
+          ]),
+        }
       );
     } catch (error) {
       console.error("notify rejected user:", error.message);
     }
 
-    await ctx
-      .editMessageText(
-        `❌ Demande #${requestId} refusée par ${escapeHtml(
-          ctx.from.first_name || "un admin"
-        )}.`,
-        { parse_mode: "HTML" }
-      )
-      .catch(() => {});
-  });
+    if (rejected.admin_message_id) {
+      await bot.telegram
+        .editMessageText(
+          ADMIN_CHAT_ID,
+          rejected.admin_message_id,
+          undefined,
+          `❌ <b>Demande #${pending.requestId} refusée</b> par ${escapeHtml(
+            pending.reviewerName
+          )}.\n\n📝 <b>Motif :</b> ${escapeHtml(reason)}`,
+          { parse_mode: "HTML" }
+        )
+        .catch(() => {});
+    }
+
+    await bot.telegram.sendMessage(
+      chatId,
+      `✅ Refus envoyé au joueur avec l’explication :\n“${escapeHtml(
+        reason
+      )}”`,
+      { parse_mode: "HTML" }
+    );
+
+    return true;
+  }
 
   instance.on("message", async (ctx, next) => {
+    if (
+      ADMIN_CHAT_ID &&
+      String(ctx.chat?.id) === String(ADMIN_CHAT_ID) &&
+      (await handleRejectReason(ctx, ctx.message))
+    ) {
+      return;
+    }
+
     await ensureUser(ctx);
     const handled = await handleProofMessage(ctx);
 
     if (!handled && typeof next === "function") {
       return next();
+    }
+  });
+
+  instance.on("channel_post", async (ctx) => {
+    if (
+      ADMIN_CHAT_ID &&
+      String(ctx.chat?.id) === String(ADMIN_CHAT_ID)
+    ) {
+      await handleRejectReason(ctx, ctx.channelPost);
     }
   });
 
