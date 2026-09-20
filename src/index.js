@@ -29,6 +29,7 @@ app.use(express.json({ limit: "15mb" }));
 
 let bot = null;
 const pendingRejectReasons = new Map();
+const proofLocks = new Map();
 
 function escapeHtml(value = "") {
   return String(value)
@@ -381,89 +382,134 @@ function adminAllowed(ctx) {
   return true;
 }
 
+async function withProofLock(telegramId, task) {
+  const key = String(telegramId);
+  const previous = proofLocks.get(key) || Promise.resolve();
+  let current;
+
+  current = previous
+    .catch(() => {})
+    .then(task);
+
+  proofLocks.set(key, current);
+
+  try {
+    return await current;
+  } finally {
+    if (proofLocks.get(key) === current) {
+      proofLocks.delete(key);
+    }
+  }
+}
+
 async function handleProofMessage(ctx) {
-  if (!supabaseConfigured() || !ADMIN_CHAT_ID || !ctx.from || !ctx.message) {
+  if (!ADMIN_CHAT_ID || !ctx.from || !ctx.message) {
     return false;
   }
 
-  const session = await db("get_session", {
-    telegram_id: ctx.from.id,
-  });
+  return withProofLock(ctx.from.id, async () => {
+    const session = await db("get_session", {
+      telegram_id: ctx.from.id,
+    });
 
-  if (!session || session.state !== "awaiting_proof") return false;
+    if (!session || session.state !== "awaiting_proof") return false;
 
-  const allowed =
-    Boolean(ctx.message.photo) ||
-    Boolean(ctx.message.document) ||
-    Boolean(ctx.message.text);
+    const allowed =
+      Boolean(ctx.message.photo) ||
+      Boolean(ctx.message.document) ||
+      Boolean(ctx.message.text);
 
-  if (!allowed) {
+    if (!allowed) {
+      await ctx.reply(
+        "Envoie une capture, une photo, un PDF ou un message texte comme preuve."
+      );
+      return true;
+    }
+
+    let request = null;
+    let adminMessageId = session.admin_message_id || null;
+    let receivedCount = Number(session.received_count || 0);
+
+    if (session.request_id) {
+      request = await db("get_request", {
+        request_id: session.request_id,
+      });
+    }
+
+    if (!request) {
+      request = await db("create_request", {
+        telegram_id: ctx.from.id,
+        method: session.method,
+        kind: session.kind,
+      });
+
+      const username = ctx.from.username
+        ? `@${ctx.from.username}`
+        : "sans @username";
+
+      const header =
+        `🧾 <b>Nouvelle demande VIP #${request.id}</b>\n\n` +
+        `👤 ${escapeHtml(ctx.from.first_name || "Utilisateur")} (${escapeHtml(
+          username
+        )})\n` +
+        `🆔 <code>${ctx.from.id}</code>\n` +
+        `💳 ${escapeHtml(methodLabel(session.method))}\n` +
+        `📌 ${escapeHtml(kindLabel(session.kind))}\n\n` +
+        "📎 Le joueur est en train d’envoyer ses preuves…";
+
+      const adminMessage = await bot.telegram.sendMessage(
+        ADMIN_CHAT_ID,
+        header,
+        { parse_mode: "HTML" }
+      );
+
+      adminMessageId = adminMessage.message_id;
+
+      await db("set_admin_message", {
+        request_id: request.id,
+        admin_message_id: adminMessageId,
+      });
+    }
+
+    try {
+      await bot.telegram.copyMessage(
+        ADMIN_CHAT_ID,
+        ctx.chat.id,
+        ctx.message.message_id
+      );
+      receivedCount += 1;
+    } catch (error) {
+      console.error("copy proof:", error.message);
+      await bot.telegram.sendMessage(
+        ADMIN_CHAT_ID,
+        `⚠️ Impossible de recopier automatiquement un élément de preuve pour la demande #${request.id}.`
+      );
+    }
+
+    await db("set_session", {
+      telegram_id: ctx.from.id,
+      state: "awaiting_proof",
+      method: session.method,
+      kind: session.kind,
+      request_id: request.id,
+      admin_message_id: adminMessageId,
+      received_count: receivedCount,
+    });
+
     await ctx.reply(
-      "Envoie une capture, une photo, un PDF ou un message texte comme preuve."
-    );
-    return true;
-  }
-
-  const request = await db("create_request", {
-    telegram_id: ctx.from.id,
-    method: session.method,
-    kind: session.kind,
-  });
-
-  const username = ctx.from.username
-    ? `@${ctx.from.username}`
-    : "sans @username";
-
-  const header =
-    `🧾 <b>Nouvelle demande VIP #${request.id}</b>\n\n` +
-    `👤 ${escapeHtml(ctx.from.first_name || "Utilisateur")} (${escapeHtml(
-      username
-    )})\n` +
-    `🆔 <code>${ctx.from.id}</code>\n` +
-    `💳 ${escapeHtml(methodLabel(session.method))}\n` +
-    `📌 ${escapeHtml(kindLabel(session.kind))}\n\n` +
-    "Vérifie la preuve ci-dessous puis valide ou refuse.";
-
-  const adminMessage = await bot.telegram.sendMessage(ADMIN_CHAT_ID, header, {
-    parse_mode: "HTML",
-    reply_markup: {
-      inline_keyboard: [
+      `📎 Élément reçu (${receivedCount}).\n\nTu peux envoyer d’autres photos/documents. Quand tu as tout envoyé, appuie sur le bouton ci-dessous.`,
+      Markup.inlineKeyboard([
         [
-          { text: "✅ VALIDER", callback_data: `approve:${request.id}` },
-          { text: "❌ REFUSER", callback_data: `reject:${request.id}` },
+          Markup.button.callback(
+            "✅ J’ai terminé mes preuves",
+            `finish_proof:${request.id}`
+          ),
         ],
-      ],
-    },
-  });
-
-  try {
-    await bot.telegram.copyMessage(
-      ADMIN_CHAT_ID,
-      ctx.chat.id,
-      ctx.message.message_id
+      ])
     );
-  } catch (error) {
-    console.error("copy proof:", error.message);
-    await bot.telegram.sendMessage(
-      ADMIN_CHAT_ID,
-      `⚠️ Impossible de recopier automatiquement la preuve pour la demande #${request.id}.`
-    );
-  }
 
-  await db("set_admin_message", {
-    request_id: request.id,
-    admin_message_id: adminMessage.message_id,
+    return true;
   });
-
-  await db("delete_session", {
-    telegram_id: ctx.from.id,
-  });
-
-  await ctx.reply(
-    "✅ Ta preuve a bien été envoyée aux administrateurs. Tu recevras ici le résultat de la validation."
-  );
-
-  return true;
 }
 
 async function sweepExpirations() {
@@ -671,18 +717,94 @@ function registerBotHandlers(instance) {
             "✅ que ton compte Yonibet est vérifié ;\n" +
             "✅ que ton dépôt a été effectué ;\n" +
             "✅ que tu as contacté le live chat avec le code <b>NASSRI</b>.\n\n" +
-            "Tu peux envoyer une capture complète ou un PDF regroupant les éléments nécessaires.\n\n" +
+            "Tu peux envoyer plusieurs photos, captures ou documents à la suite. Quand tu as tout envoyé, appuie sur « ✅ J’ai terminé mes preuves ».\n\n" +
             "⚠️ Masque les informations sensibles inutiles. N’envoie jamais ta pièce d’identité, tes documents KYC, ton mot de passe ni tes données bancaires.\n\n" +
             "Tape /cancel pour annuler.",
           { parse_mode: "HTML" }
         );
       } else {
         await ctx.reply(
-          "📎 Envoie maintenant ta preuve dans ce chat.\n\nFormats acceptés : capture/photo, PDF ou texte.\n\n⚠️ Ne transmets jamais de pièce d’identité ni le PIN/code complet d’une Paysafecard.\n\nTape /cancel pour annuler."
+          "📎 Envoie maintenant ta ou tes preuves dans ce chat.\n\nTu peux envoyer plusieurs photos/documents à la suite. Quand tu as tout envoyé, appuie sur « ✅ J’ai terminé mes preuves ».\n\nFormats acceptés : capture/photo, PDF ou texte.\n\n⚠️ Ne transmets jamais de pièce d’identité ni le PIN/code complet d’une Paysafecard.\n\nTape /cancel pour annuler."
         );
       }
     }
   );
+
+  instance.action(/^finish_proof:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+
+    const requestId = ctx.match[1];
+    const session = await db("get_session", {
+      telegram_id: ctx.from.id,
+    });
+
+    if (
+      !session ||
+      session.state !== "awaiting_proof" ||
+      String(session.request_id) !== String(requestId)
+    ) {
+      return ctx.reply(
+        "⚠️ Cette demande n’est plus en cours. Recommence depuis le menu si nécessaire."
+      );
+    }
+
+    const request = await db("get_request", {
+      request_id: requestId,
+    });
+
+    if (!request || request.status !== "pending") {
+      return ctx.reply("⚠️ Cette demande a déjà été traitée.");
+    }
+
+    const receivedCount = Number(session.received_count || 0);
+
+    if (receivedCount < 1) {
+      return ctx.reply("Envoie au moins une preuve avant de terminer.");
+    }
+
+    if (request.admin_message_id) {
+      await bot.telegram
+        .editMessageText(
+          ADMIN_CHAT_ID,
+          request.admin_message_id,
+          undefined,
+          `🧾 <b>Demande VIP #${request.id}</b>\n\n` +
+            `🆔 <code>${request.telegram_id}</code>\n` +
+            `💳 ${escapeHtml(methodLabel(request.method))}\n` +
+            `📌 ${escapeHtml(kindLabel(request.kind))}\n` +
+            `📎 <b>${receivedCount} élément(s) de preuve reçu(s)</b>\n\n` +
+            "Vérifie toutes les preuves ci-dessous puis valide ou refuse.",
+          {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "✅ VALIDER",
+                    callback_data: `approve:${request.id}`,
+                  },
+                  {
+                    text: "❌ REFUSER",
+                    callback_data: `reject:${request.id}`,
+                  },
+                ],
+              ],
+            },
+          }
+        )
+        .catch((error) =>
+          console.error("finalize admin request:", error.message)
+        );
+    }
+
+    await db("delete_session", {
+      telegram_id: ctx.from.id,
+    });
+
+    await ctx.reply(
+      `✅ Tes ${receivedCount} élément(s) de preuve ont bien été envoyés aux administrateurs. Tu recevras ici le résultat de la validation.`
+    );
+  });
 
   instance.action(/^approve:(\d+)$/, async (ctx) => {
     if (!adminAllowed(ctx)) {
