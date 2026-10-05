@@ -1,0 +1,26 @@
+name: Premium UI check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [premium-single-card-ui]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check JavaScript syntax
+        run: |
+          node --check src/index.js
+          node --check src/premium-ui.js
+          node --check scripts/check-premium-ui.js
+          node --check scripts/check-premium-ui-flow.js
+      - name: Validate premium assets
+        run: node scripts/check-premium-ui.js
+      - name: Validate single-card flow
+        run: node scripts/check-premium-ui-flow.js
