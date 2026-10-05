@@ -5,7 +5,7 @@
   "description": "Bot Telegram de gestion d'accès VIP avec validation admin et expiration automatique",
   "main": "src/index.js",
   "scripts": {
-    "start": "node -r ./src/premium-ui.js src/index.js"
+    "start": "node -r ./src/hd-assets.js -r ./src/premium-ui.js src/index.js"
   },
   "engines": {
     "node": "20.x"
