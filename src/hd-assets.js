@@ -12,17 +12,29 @@ const HD_ASSETS = {
   help: "https://d2jqrm6oza8nb6.cloudfront.net/datasets/6d274b85-52f7-4592-abdf-8ebc210db5cf.png?_jwt=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXlIYXNoIjoiNzE5OWMwMzZkOGYwZTM4YSIsImJ1Y2tldCI6InJ1bndheS1kYXRhc2V0cyIsInN0YWdlIjoicHJvZCIsImV4cCI6MTc5MTMzNTIyMn0.d_ogRewcG87vYHIGjBAta1uy2glqgeHzrhAqw3k4jwA",
 };
 
-function hdAssetFor(media) {
+function hdAssetInfo(media) {
   if (!media || typeof media === "string") return null;
   const filename = String(media.filename || "");
   const match = filename.match(/^([a-z]+)\.jpg$/i);
-  return match ? HD_ASSETS[match[1]] || null : null;
+  const name = match?.[1];
+  const url = name ? HD_ASSETS[name] : null;
+  return url ? { name, url } : null;
 }
 
 if (Telegram?.prototype?.sendPhoto) {
   const originalSendPhoto = Telegram.prototype.sendPhoto;
-  Telegram.prototype.sendPhoto = function hdSendPhoto(chatId, photo, extra) {
-    return originalSendPhoto.call(this, chatId, hdAssetFor(photo) || photo, extra);
+  Telegram.prototype.sendPhoto = async function hdSendPhoto(chatId, photo, extra) {
+    const hd = hdAssetInfo(photo);
+    const message = await originalSendPhoto.call(this, chatId, hd?.url || photo, extra);
+
+    if (hd) {
+      const telegramPhoto = Array.isArray(message?.photo) ? message.photo.at(-1) : null;
+      if (telegramPhoto?.file_id) {
+        console.log(`HD_ASSET_FILE_ID ${hd.name}=${telegramPhoto.file_id}`);
+      }
+    }
+
+    return message;
   };
 }
 
@@ -35,8 +47,8 @@ if (Telegram?.prototype?.editMessageMedia) {
     media,
     extra
   ) {
-    const replacement = hdAssetFor(media?.media);
-    const nextMedia = replacement ? { ...media, media: replacement } : media;
+    const hd = hdAssetInfo(media?.media);
+    const nextMedia = hd ? { ...media, media: hd.url } : media;
     return originalEditMessageMedia.call(
       this,
       chatId,
