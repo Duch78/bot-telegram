@@ -14,7 +14,7 @@ const PAYSAFECARD_TEXT =
   process.env.PAYSAFECARD_TEXT ||
   "Effectue ton paiement Paysafecard selon les instructions de l’administrateur, puis envoie uniquement une preuve du paiement.";
 const YONIBET_URL = process.env.YONIBET_URL || "https://tinyurl.com/NASSRIxYONIBET";
-const CELSIUS_URL = (process.env.CELSIUS_URL || "").trim();
+const CELSIUS_URL = (process.env.CELSIUS_URL || "https://lrct.gg/nassri").trim();
 const CELSIUS_AVAILABLE = /^https:\/\/[^\s]+$/i.test(CELSIUS_URL);
 const VIP_PRICE_TEXT = process.env.VIP_PRICE_TEXT || "Tarif communiqué par l’administrateur";
 const VIP_DAYS = Number(process.env.VIP_DAYS || 30);
@@ -317,8 +317,9 @@ async function showMethodInstructions(ctx, kind, method) {
     text +=
       "🟢 <b>Accéder au VIP via Celsius :</b>\n\n" +
       "1️⃣ Inscris-toi sur Celsius avec le lien partenaire ci-dessous.\n" +
-      "2️⃣ Suis les conditions de l’offre et effectue le dépôt requis, s’il est prévu.\n" +
-      "3️⃣ Reviens ici et envoie les preuves de ton inscription et du dépôt applicable.\n\n" +
+      "2️⃣ Effectue ton premier dépôt selon les conditions Celsius.\n" +
+      "3️⃣ Reviens ici et envoie les preuves de ton inscription et de ton premier dépôt.\n\n" +
+      "🎁 <b>Offre partenaire : 50 % de freebet sur ton premier dépôt</b>, selon les conditions Celsius.\n\n" +
       "⏳ Un administrateur vérifie ta demande avant l’activation de ton VIP.\n" +
       "🔞 Réservé aux personnes majeures.\n" +
       "⚠️ Masque tes données personnelles et de paiement.";
@@ -755,7 +756,7 @@ function registerBotHandlers(instance) {
       } else if (method === "celsius") {
         await ctx.reply(
           "📎 <b>Envoie tes preuves Celsius.</b>\n\n" +
-            "Envoie la confirmation d’inscription via le lien partenaire et, si l’offre le prévoit, la confirmation du dépôt.\n\n" +
+            "Envoie la confirmation d’inscription via le lien partenaire et la confirmation de ton premier dépôt.\n\n" +
             "Tu peux envoyer plusieurs captures, photos, documents ou messages. Quand tu as terminé, appuie sur « ✅ J’ai terminé mes preuves ».\n\n" +
             "⚠️ Masque les informations personnelles inutiles : aucune pièce d’identité, donnée bancaire ou mot de passe.\n\n" +
             "Tape /cancel pour annuler.",
