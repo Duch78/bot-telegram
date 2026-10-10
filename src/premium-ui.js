@@ -204,7 +204,8 @@ function transformedCopy(text, extra = {}) {
       "4️⃣ Un admin vérifie.\n" +
       "5️⃣ Après validation, tu reçois ton lien VIP.\n\n" +
       "♻️ Renouvellement : PayPal ou Paysafecard.\n" +
-      "🎁 Yonibet : premier accès uniquement.";
+      "🎁 Yonibet et Celsius : premier accès uniquement.\n" +
+      "🟢 Celsius : 50 % de freebet sur le premier dépôt, selon conditions.";
 
     nextExtra = {
       ...nextExtra,
