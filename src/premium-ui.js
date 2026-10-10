@@ -12,6 +12,7 @@ const ASSET_NAMES = [
   "paypal",
   "paysafecard",
   "yonibet",
+  "celsius",
   "proof",
   "pending",
   "approved",
@@ -74,6 +75,8 @@ function screenFor(text) {
   ) {
     return "yonibet";
   }
+
+  if (text.startsWith("💳 <b>Affiliation Celsius</b>")) return "celsius";
 
   if (
     text.startsWith("📎 <b>Envoie maintenant ta preuve Yonibet") ||
@@ -183,6 +186,13 @@ function transformedCopy(text, extra = {}) {
       "🎁 50 % du dépôt en freebet selon les conditions Yonibet.\n" +
       "🔞 18+ uniquement.\n" +
       "⚠️ N’envoie jamais de pièce d’identité, KYC, mot de passe ou données bancaires.";
+  } else if (text.startsWith("💳 <b>Affiliation Celsius</b>")) {
+    caption =
+      "🟢 <b>Accès VIP via Celsius</b>\n\n" +
+      "1️⃣ Inscris-toi avec le lien partenaire ci-dessous.\n" +
+      "2️⃣ Suis les conditions de l’offre (dépôt si applicable).\n" +
+      "3️⃣ Envoie les preuves ici pour la validation admin.\n\n" +
+      "🔞 18+ uniquement. Masque tes informations sensibles.";
   } else if (text.startsWith("ℹ️ Choisis ton moyen d’accès")) {
     caption =
       "❓ <b>Comment ça marche ?</b>\n\n" +
@@ -206,13 +216,16 @@ function transformedCopy(text, extra = {}) {
     text.startsWith("📎 <b>Envoie maintenant ta preuve Yonibet")
   ) {
     const yonibet = text.includes("Yonibet");
+    const celsius = text.includes("Celsius");
 
     caption =
       "📎 <b>Envoi des preuves</b>\n\n" +
       "Envoie tes captures, photos, PDF ou messages texte dans ce chat." +
       (yonibet
         ? "\n\nPour Yonibet : compte vérifié, dépôt confirmé et chat avec le code NASSRI."
-        : "") +
+        : celsius
+          ? "\n\nPour Celsius : preuve d’inscription et de dépôt si l’offre le requiert."
+          : "") +
       "\n\nTu peux en envoyer plusieurs. Quand tu as terminé, appuie sur <b>✅ J’ai terminé mes preuves</b>.\n\n" +
       "⚠️ Ne transmets jamais de pièce d’identité, mot de passe, données bancaires ou PIN Paysafecard complet.";
 
