@@ -190,8 +190,9 @@ function transformedCopy(text, extra = {}) {
     caption =
       "🟢 <b>Accès VIP via Celsius</b>\n\n" +
       "1️⃣ Inscris-toi avec le lien partenaire ci-dessous.\n" +
-      "2️⃣ Suis les conditions de l’offre (dépôt si applicable).\n" +
+      "2️⃣ Effectue ton premier dépôt.\n" +
       "3️⃣ Envoie les preuves ici pour la validation admin.\n\n" +
+      "🎁 <b>50 % de freebet sur le premier dépôt</b> (conditions Celsius).\n\n" +
       "🔞 18+ uniquement. Masque tes informations sensibles.";
   } else if (text.startsWith("ℹ️ Choisis ton moyen d’accès")) {
     caption =
