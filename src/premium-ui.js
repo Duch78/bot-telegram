@@ -80,6 +80,7 @@ function screenFor(text) {
 
   if (
     text.startsWith("📎 <b>Envoie maintenant ta preuve Yonibet") ||
+    text.startsWith("📎 <b>Envoie tes preuves Celsius.") ||
     text.startsWith("📎 Envoie maintenant ta ou tes preuves") ||
     text.startsWith("📎 Élément reçu")
   ) {
@@ -214,7 +215,8 @@ function transformedCopy(text, extra = {}) {
     };
   } else if (
     text.startsWith("📎 Envoie maintenant ta ou tes preuves") ||
-    text.startsWith("📎 <b>Envoie maintenant ta preuve Yonibet")
+    text.startsWith("📎 <b>Envoie maintenant ta preuve Yonibet") ||
+    text.startsWith("📎 <b>Envoie tes preuves Celsius.")
   ) {
     const yonibet = text.includes("Yonibet");
     const celsius = text.includes("Celsius");
@@ -225,7 +227,7 @@ function transformedCopy(text, extra = {}) {
       (yonibet
         ? "\n\nPour Yonibet : compte vérifié, dépôt confirmé et chat avec le code NASSRI."
         : celsius
-          ? "\n\nPour Celsius : preuve d’inscription et de dépôt si l’offre le requiert."
+          ? "\n\nPour Celsius : preuve d’inscription et du premier dépôt."
           : "") +
       "\n\nTu peux en envoyer plusieurs. Quand tu as terminé, appuie sur <b>✅ J’ai terminé mes preuves</b>.\n\n" +
       "⚠️ Ne transmets jamais de pièce d’identité, mot de passe, données bancaires ou PIN Paysafecard complet.";
