@@ -7,6 +7,7 @@ const requiredScreens = [
   "paypal",
   "paysafecard",
   "yonibet",
+  "celsius",
   "proof",
   "pending",
   "approved",
