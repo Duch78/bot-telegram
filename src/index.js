@@ -644,7 +644,7 @@ function registerBotHandlers(instance) {
   instance.action("help", async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.reply(
-      "ℹ️ Choisis ton moyen d’accès, envoie ta preuve, puis un administrateur la vérifie. Après validation, le bot te remet un lien privé à usage unique. L’accès dure 30 jours. Les renouvellements se font uniquement par PayPal ou Paysafecard."
+      "ℹ️ Choisis ton moyen d’accès, envoie ta preuve, puis un administrateur la vérifie. Après validation, le bot te remet un lien privé à usage unique. L’accès dure 30 jours. Les renouvellements se font uniquement par PayPal ou Paysafecard. En première souscription, les accès partenaires Yonibet et Celsius sont aussi proposés ; Celsius offre 50 % de freebet sur le premier dépôt, selon ses conditions."
     );
   });
 
