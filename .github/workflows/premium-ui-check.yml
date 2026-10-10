@@ -20,7 +20,10 @@ jobs:
           node --check src/premium-ui.js
           node --check scripts/check-premium-ui.js
           node --check scripts/check-premium-ui-flow.js
+          node --check scripts/check-celsius-flow.js
       - name: Validate premium assets
         run: node scripts/check-premium-ui.js
       - name: Validate single-card flow
         run: node scripts/check-premium-ui-flow.js
+      - name: Validate Celsius VIP flow
+        run: node scripts/check-celsius-flow.js
