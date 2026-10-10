@@ -26,7 +26,7 @@ Bot Telegram pour gérer un VIP de pronostics avec validation manuelle par des a
 - `PAYPAL_URL` : lien PayPal.
 - `PAYSAFECARD_TEXT` : instructions Paysafecard.
 - `YONIBET_URL` : lien affilié Yonibet.
-- `CELSIUS_URL` : lien partenaire Celsius en HTTPS. Sans lien, les boutons Celsius restent masqués. Aucun montant minimum n’est supposé dans le bot.
+- `CELSIUS_URL` : lien partenaire Celsius en HTTPS (par défaut : https://lrct.gg/nassri). Un lien invalide masque les boutons Celsius. Offre annoncée : 50 % de freebet sur le premier dépôt, selon conditions Celsius. Aucun montant minimum n’est supposé dans le bot.
 - `VIP_PRICE_TEXT` : texte du tarif.
 - `ADMIN_USER_IDS` : IDs Telegram des admins autorisés, séparés par des virgules (optionnel).
 - `VIP_DAYS` : durée du VIP, 30 par défaut.
