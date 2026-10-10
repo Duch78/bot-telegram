@@ -20,9 +20,7 @@ for (const expected of [
   "method === \"celsius\"",
   "proof:(initial|renewal):(paypal|paysafecard|yonibet|celsius)",
   "Les accès partenaires Yonibet et Celsius sont réservés à la première souscription",
-  "Mark up",
 ]) {
-  if (expected === "Mark up") continue;
   assert.ok(index.includes(expected), "Missing Celsius callback/text: " + expected);
 }
 for (const expected of [
