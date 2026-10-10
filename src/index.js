@@ -14,6 +14,8 @@ const PAYSAFECARD_TEXT =
   process.env.PAYSAFECARD_TEXT ||
   "Effectue ton paiement Paysafecard selon les instructions de l’administrateur, puis envoie uniquement une preuve du paiement.";
 const YONIBET_URL = process.env.YONIBET_URL || "https://tinyurl.com/NASSRIxYONIBET";
+const CELSIUS_URL = (process.env.CELSIUS_URL || "https://lrct.gg/nassri").trim();
+const CELSIUS_AVAILABLE = /^https:\/\/[^\s]+$/i.test(CELSIUS_URL);
 const VIP_PRICE_TEXT = process.env.VIP_PRICE_TEXT || "Tarif communiqué par l’administrateur";
 const VIP_DAYS = Number(process.env.VIP_DAYS || 30);
 const INVITE_MINUTES = Number(process.env.INVITE_MINUTES || 15);
@@ -43,6 +45,7 @@ function methodLabel(method) {
     paypal: "PayPal",
     paysafecard: "Paysafecard",
     yonibet: "Affiliation Yonibet",
+    celsius: "Affiliation Celsius",
   }[method] || method;
 }
 
@@ -240,6 +243,11 @@ async function showMethods(ctx, kind) {
         `method:${kind}:yonibet`
       ),
     ]);
+    if (CELSIUS_AVAILABLE) {
+      buttons.push([
+        Markup.button.callback("🟢 Accès via Celsius", `method:${kind}:celsius`),
+      ]);
+    }
   }
 
   buttons.push([Markup.button.callback("⬅️ Retour", "home")]);
@@ -296,6 +304,26 @@ async function showMethodInstructions(ctx, kind, method) {
     if (YONIBET_URL) {
       buttons.push([Markup.button.url("🎁 S’inscrire sur Yonibet", YONIBET_URL)]);
     }
+  }
+
+  if (method === "celsius") {
+    if (kind !== "initial") {
+      return ctx.reply("L’accès Celsius est réservé à la première souscription.");
+    }
+    if (!CELSIUS_AVAILABLE) {
+      return ctx.reply("Le lien partenaire Celsius n’est pas encore disponible.");
+    }
+
+    text +=
+      "🟢 <b>Accéder au VIP via Celsius :</b>\n\n" +
+      "1️⃣ Inscris-toi sur Celsius avec le lien partenaire ci-dessous.\n" +
+      "2️⃣ Effectue ton premier dépôt selon les conditions Celsius.\n" +
+      "3️⃣ Reviens ici et envoie les preuves de ton inscription et de ton premier dépôt.\n\n" +
+      "🎁 <b>Offre partenaire : 50 % de freebet sur ton premier dépôt</b>, selon les conditions Celsius.\n\n" +
+      "⏳ Un administrateur vérifie ta demande avant l’activation de ton VIP.\n" +
+      "🔞 Réservé aux personnes majeures.\n" +
+      "⚠️ Masque tes données personnelles et de paiement.";
+    buttons.push([Markup.button.url("🌐 Ouvrir Celsius", CELSIUS_URL)]);
   }
 
   text +=
@@ -616,7 +644,7 @@ function registerBotHandlers(instance) {
   instance.action("help", async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.reply(
-      "ℹ️ Choisis ton moyen d’accès, envoie ta preuve, puis un administrateur la vérifie. Après validation, le bot te remet un lien privé à usage unique. L’accès dure 30 jours. Les renouvellements se font uniquement par PayPal ou Paysafecard."
+      "ℹ️ Choisis ton moyen d’accès, envoie ta preuve, puis un administrateur la vérifie. Après validation, le bot te remet un lien privé à usage unique. L’accès dure 30 jours. Les renouvellements se font uniquement par PayPal ou Paysafecard. En première souscription, les accès partenaires Yonibet et Celsius sont aussi proposés ; Celsius offre 50 % de freebet sur le premier dépôt, selon ses conditions."
     );
   });
 
@@ -673,7 +701,7 @@ function registerBotHandlers(instance) {
   });
 
   instance.action(
-    /^method:(initial|renewal):(paypal|paysafecard|yonibet)$/,
+    /^method:(initial|renewal):(paypal|paysafecard|yonibet|celsius)$/,
     async (ctx) => {
       await ctx.answerCbQuery();
       const [, kind, method] = ctx.match;
@@ -682,24 +710,27 @@ function registerBotHandlers(instance) {
   );
 
   instance.action(
-    /^proof:(initial|renewal):(paypal|paysafecard|yonibet)$/,
+    /^proof:(initial|renewal):(paypal|paysafecard|yonibet|celsius)$/,
     async (ctx) => {
       await ctx.answerCbQuery();
       await ensureUser(ctx);
 
       const [, kind, method] = ctx.match;
 
-      if (kind === "renewal" && method === "yonibet") {
+      if (kind === "renewal" && ["yonibet", "celsius"].includes(method)) {
         return ctx.reply(
-          "Yonibet n’est pas disponible pour les renouvellements."
+          "Les accès partenaires Yonibet et Celsius sont réservés aux premières souscriptions."
         );
+      }
+      if (method === "celsius" && !CELSIUS_AVAILABLE) {
+        return ctx.reply("Le lien partenaire Celsius n’est pas encore disponible.");
       }
 
       const subscription = await getSubscription(ctx.from.id);
 
-      if (kind === "initial" && method === "yonibet" && subscription) {
+      if (kind === "initial" && ["yonibet", "celsius"].includes(method) && subscription) {
         return ctx.reply(
-          "L’affiliation Yonibet est réservée à la première souscription. Pour renouveler, utilise PayPal ou Paysafecard."
+          "Les accès partenaires Yonibet et Celsius sont réservés à la première souscription. Pour renouveler, utilise PayPal ou Paysafecard."
         );
       }
 
@@ -719,6 +750,15 @@ function registerBotHandlers(instance) {
             "✅ que tu as contacté le live chat avec le code <b>NASSRI</b>.\n\n" +
             "Tu peux envoyer plusieurs photos, captures ou documents à la suite. Quand tu as tout envoyé, appuie sur « ✅ J’ai terminé mes preuves ».\n\n" +
             "⚠️ Masque les informations sensibles inutiles. N’envoie jamais ta pièce d’identité, tes documents KYC, ton mot de passe ni tes données bancaires.\n\n" +
+            "Tape /cancel pour annuler.",
+          { parse_mode: "HTML" }
+        );
+      } else if (method === "celsius") {
+        await ctx.reply(
+          "📎 <b>Envoie tes preuves Celsius.</b>\n\n" +
+            "Envoie la confirmation d’inscription via le lien partenaire et la confirmation de ton premier dépôt.\n\n" +
+            "Tu peux envoyer plusieurs captures, photos, documents ou messages. Quand tu as terminé, appuie sur « ✅ J’ai terminé mes preuves ».\n\n" +
+            "⚠️ Masque les informations personnelles inutiles : aucune pièce d’identité, donnée bancaire ou mot de passe.\n\n" +
             "Tape /cancel pour annuler.",
           { parse_mode: "HTML" }
         );
